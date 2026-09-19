@@ -1,3 +1,4 @@
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.IService;
 using MedMateAI.Domain.Enums;
 using MedMateAI.Domain.Persistence;
@@ -24,7 +25,13 @@ public sealed class LabTestOcrProcessor : ILabTestOcrProcessor
         _logger = logger;
     }
 
-    public async Task ProcessAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    public Task ProcessAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+        ProcessAsync(sessionId, isFinalAttempt: true, cancellationToken);
+
+    public async Task ProcessAsync(
+        Guid sessionId,
+        bool isFinalAttempt,
+        CancellationToken cancellationToken = default)
     {
         var session = await _unitOfWork.LabTestSessions.GetByIdAsync(sessionId, cancellationToken);
         if (session is null)
@@ -53,31 +60,56 @@ public sealed class LabTestOcrProcessor : ILabTestOcrProcessor
 
         try
         {
-            var rawOcrText = await _documentIntelligenceService.AnalyzeFromUrlAsync(
-                session.DocumentUrl,
-                cancellationToken);
-
-            if (string.IsNullOrWhiteSpace(rawOcrText))
+            if (string.IsNullOrWhiteSpace(session.RawOcrText))
             {
-                _logger.LogWarning(
-                    "dịch vụ lab test ocr trả về kết quả rỗng. {SessionId}",
-                    sessionId);
+                var rawOcrText = await _documentIntelligenceService.AnalyzeFromUrlAsync(
+                    session.DocumentUrl,
+                    cancellationToken);
 
-                session.Status = LabTestSessionStatus.Failed;
+                if (string.IsNullOrWhiteSpace(rawOcrText))
+                {
+                    _logger.LogWarning(
+                        "dịch vụ lab test ocr trả về kết quả rỗng. {SessionId}",
+                        sessionId);
+
+                    session.Status = LabTestSessionStatus.Failed;
+                    session.UpdatedAt = DateTime.UtcNow;
+                    _unitOfWork.LabTestSessions.Update(session);
+                    await _unitOfWork.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+
+                session.RawOcrText = rawOcrText;
+                session.ProcessedAt = DateTime.UtcNow;
                 session.UpdatedAt = DateTime.UtcNow;
+
                 _unitOfWork.LabTestSessions.Update(session);
                 await _unitOfWork.SaveChangesAsync(cancellationToken);
-                return;
             }
 
-            session.RawOcrText = rawOcrText;
-            session.ProcessedAt = DateTime.UtcNow;
-            session.UpdatedAt = DateTime.UtcNow;
+            await _resultAnalyzer.AnalyzeAndPersistAsync(sessionId, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (BackgroundJobRetry.IsRetryable(ex))
+        {
+            _logger.LogWarning(
+                ex,
+                "Lab test OCR hit a transient failure for session {SessionId}. FinalAttempt={IsFinalAttempt}.",
+                sessionId,
+                isFinalAttempt);
 
+            if (!isFinalAttempt)
+            {
+                throw;
+            }
+
+            session.Status = LabTestSessionStatus.Failed;
+            session.UpdatedAt = DateTime.UtcNow;
             _unitOfWork.LabTestSessions.Update(session);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-            await _resultAnalyzer.AnalyzeAndPersistAsync(sessionId, cancellationToken);
         }
         catch (Exception ex)
         {

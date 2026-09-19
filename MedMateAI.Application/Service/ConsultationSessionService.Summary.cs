@@ -3,9 +3,11 @@ using MedMateAI.Application.DTOs.ChecklistItems.Responses;
 using MedMateAI.Application.DTOs.ConsultationSessions.Requests;
 using MedMateAI.Application.DTOs.ConsultationSessions.Responses;
 using MedMateAI.Application.DTOs.Users.Responses;
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.Models.Notifications;
 using MedMateAI.Domain.Entities;
 using MedMateAI.Domain.Enums;
+
 namespace MedMateAI.Application.Service;
 
 public sealed partial class ConsultationSessionService
@@ -169,13 +171,16 @@ public sealed partial class ConsultationSessionService
             q => q.OrderBy(x => x.Priority),
             cancellationToken: cancellationToken);
 
+        var emailRequired = HasDeliveryEmail(user);
+        var pushRequired = await HasActivePushDevicesAsync(userId, cancellationToken);
+
         if (sendReminderSms
             && session.IsReminderEnabled
+            && !session.ReminderScheduledAt.HasValue
             && !session.ReminderSmsSentAt.HasValue
             && session.AppointmentTime.HasValue
-            && (HasDeliveryEmail(user) || await HasActivePushDevicesAsync(userId, cancellationToken)))
+            && (emailRequired || pushRequired))
         {
-           
             var remindAtUtc = session.AppointmentTime.Value.ToUniversalTime().AddHours(-1);
             if (remindAtUtc > DateTime.UtcNow)
             {
@@ -186,7 +191,8 @@ public sealed partial class ConsultationSessionService
                 _jobScheduler.EnqueueReminderSms(session.Id);
             }
 
-            session.ReminderSmsSentAt = DateTime.UtcNow;
+            // ReminderSmsSentAt stays null until the Hangfire job finishes all required channels.
+            session.ReminderScheduledAt = DateTime.UtcNow;
             session.UpdatedAt = DateTime.UtcNow;
             _consultationSessions.Update(session);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
@@ -209,6 +215,10 @@ public sealed partial class ConsultationSessionService
             Symptoms = session.UserSymptoms?.Trim() ?? string.Empty,
             Status = session.Status,
             IsReminderEnabled = session.IsReminderEnabled,
+            ReminderEmailRequired = emailRequired,
+            ReminderPushRequired = pushRequired,
+            ReminderEmailSent = session.ReminderEmailSentAt.HasValue,
+            ReminderPushSent = session.ReminderPushSentAt.HasValue,
             ReminderSmsSent = session.ReminderSmsSentAt.HasValue,
             ChecklistItems = checklistItems,
             Questions = questionsPaged.Items
@@ -266,6 +276,7 @@ public sealed partial class ConsultationSessionService
 
         if (session is null
             || !session.IsReminderEnabled
+            || session.ReminderSmsSentAt.HasValue
             || !session.AppointmentTime.HasValue
             || DateTime.UtcNow >= session.AppointmentTime.Value.ToUniversalTime())
         {
@@ -278,9 +289,9 @@ public sealed partial class ConsultationSessionService
             return;
         }
 
-        var hasEmail = HasDeliveryEmail(user);
-        var hasPushDevices = await HasActivePushDevicesAsync(session.UserId, cancellationToken);
-        if (!hasEmail && !hasPushDevices)
+        var emailRequired = HasDeliveryEmail(user);
+        var pushRequired = await HasActivePushDevicesAsync(session.UserId, cancellationToken);
+        if (!emailRequired && !pushRequired)
         {
             return;
         }
@@ -300,8 +311,12 @@ public sealed partial class ConsultationSessionService
 
         var departmentName = department?.DepartmentName?.Trim() ?? string.Empty;
         var facilityDisplayName = facilityName ?? "Chưa cập nhật";
-        var emailSent = false;
-        if (hasEmail)
+        var utcNow = DateTime.UtcNow;
+        var sessionDirty = false;
+        var hasRetryableFailure = false;
+
+        var emailOk = !emailRequired || session.ReminderEmailSentAt.HasValue;
+        if (emailRequired && !session.ReminderEmailSentAt.HasValue)
         {
             var htmlContent = ConsultationReminderEmailBuilder.BuildHtml(
                 user.DisplayName ?? user.UserName ?? "Bạn",
@@ -317,29 +332,72 @@ public sealed partial class ConsultationSessionService
                     ConsultationReminderEmailBuilder.Subject,
                     htmlContent,
                     cancellationToken);
-                emailSent = true;
+                session.ReminderEmailSentAt = utcNow;
+                emailOk = true;
+                sessionDirty = true;
             }
-            catch
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                emailSent = false;
+                throw;
+            }
+            catch (Exception ex) when (BackgroundJobRetry.IsRetryable(ex))
+            {
+                hasRetryableFailure = true;
+            }
+            catch (Exception)
+            {
+                // Terminal email failure — do not retry this channel.
+                emailOk = false;
             }
         }
 
-        var pushSent = await SendConsultationReminderPushAsync(
-            session,
-            departmentName,
-            facilityDisplayName,
-            cancellationToken);
-
-        if (!emailSent && !pushSent)
+        var pushOk = !pushRequired || session.ReminderPushSentAt.HasValue;
+        if (pushRequired && !session.ReminderPushSentAt.HasValue)
         {
+            var pushAttempt = await SendConsultationReminderPushAsync(
+                session,
+                departmentName,
+                facilityDisplayName,
+                cancellationToken);
+
+            if (pushAttempt.Succeeded)
+            {
+                session.ReminderPushSentAt = utcNow;
+                pushOk = true;
+                sessionDirty = true;
+            }
+            else if (pushAttempt.HasRetryableFailure)
+            {
+                hasRetryableFailure = true;
+                pushOk = false;
+            }
+            else
+            {
+                pushOk = false;
+            }
+        }
+
+        if (sessionDirty)
+        {
+            session.UpdatedAt = utcNow;
+            _consultationSessions.Update(session);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        if (emailOk && pushOk)
+        {
+            session.ReminderSmsSentAt = DateTime.UtcNow;
+            session.UpdatedAt = DateTime.UtcNow;
+            _consultationSessions.Update(session);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
             return;
         }
 
-        session.ReminderSmsSentAt = DateTime.UtcNow;
-        session.UpdatedAt = DateTime.UtcNow;
-        _consultationSessions.Update(session);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        if (hasRetryableFailure)
+        {
+            throw new TransientRemoteCallException(
+                "Consultation reminder hit a transient email/push failure.");
+        }
     }
 
     private static bool HasDeliveryEmail(ApplicationUserResponse user)
@@ -355,7 +413,7 @@ public sealed partial class ConsultationSessionService
         return devices.Count > 0;
     }
 
-    private async Task<bool> SendConsultationReminderPushAsync(
+    private async Task<ReminderPushAttemptResult> SendConsultationReminderPushAsync(
         ConsultationSession session,
         string departmentName,
         string facilityName,
@@ -366,7 +424,7 @@ public sealed partial class ConsultationSessionService
             cancellationToken);
         if (devices.Count == 0)
         {
-            return false;
+            return new ReminderPushAttemptResult(Succeeded: false, HasRetryableFailure: false);
         }
 
         var body = ConsultationReminderPushBuilder.BuildBody(
@@ -376,6 +434,7 @@ public sealed partial class ConsultationSessionService
         var data = ConsultationReminderPushBuilder.BuildData(session.Id);
         var ttlSeconds = ConsultationReminderPushBuilder.BuildTimeToLiveSeconds(session.AppointmentTime);
         var anyAccepted = false;
+        var hasRetryableFailure = false;
         var utcNow = DateTime.UtcNow;
 
         foreach (var device in devices)
@@ -399,6 +458,9 @@ public sealed partial class ConsultationSessionService
                 case PushSendOutcome.Accepted:
                     anyAccepted = true;
                     break;
+                case PushSendOutcome.RetryableFailure:
+                    hasRetryableFailure = true;
+                    break;
                 case PushSendOutcome.InvalidDevice:
                     await _pushDeviceRepository.DeactivateIfTokenVersionMatchesAsync(
                         device.Id,
@@ -410,6 +472,8 @@ public sealed partial class ConsultationSessionService
             }
         }
 
-        return anyAccepted;
+        return new ReminderPushAttemptResult(anyAccepted, hasRetryableFailure && !anyAccepted);
     }
+
+    private sealed record ReminderPushAttemptResult(bool Succeeded, bool HasRetryableFailure);
 }

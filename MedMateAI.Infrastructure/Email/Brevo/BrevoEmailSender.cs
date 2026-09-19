@@ -2,6 +2,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MedMateAI.Application.Common;
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.IService;
 using MedMateAI.Infrastructure.Auth.Providers;
 using MedMateAI.Infrastructure.Email.Brevo.Models;
@@ -107,13 +109,19 @@ public sealed class BrevoEmailSender : IEmailSender, IEmailOtpSender
             return;
         }
 
+        var statusCode = (int)response.StatusCode;
         _logger.LogWarning(
             "Brevo SMTP API failed with status code {StatusCode}. Response: {ResponseBody}",
-            (int)response.StatusCode,
+            statusCode,
             Truncate(responseBody, 500));
 
-        throw new InvalidOperationException(
-            $"Brevo SMTP API failed with status code {(int)response.StatusCode}.");
+        var message = $"Brevo SMTP API failed with status code {statusCode}.";
+        if (BackgroundJobRetry.IsTransientHttpStatusCode(statusCode))
+        {
+            throw new TransientRemoteCallException(message, statusCode);
+        }
+
+        throw new InvalidOperationException(message);
     }
 
     private async Task<HttpResponseMessage> SendBrevoRequestAsync(
@@ -123,6 +131,15 @@ public sealed class BrevoEmailSender : IEmailSender, IEmailOtpSender
         try
         {
             return await _httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or TimeoutException or IOException)
+        {
+            _logger.LogError(ex, "Brevo SMTP API request failed.");
+            throw new TransientRemoteCallException("Brevo SMTP API request failed.", innerException: ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

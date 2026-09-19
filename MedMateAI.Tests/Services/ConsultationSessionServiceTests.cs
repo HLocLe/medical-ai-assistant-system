@@ -491,6 +491,11 @@ public class ConsultationSessionServiceTests
             Assert.That(data, Is.Not.Null);
             Assert.That(data!.SessionId, Is.EqualTo(_sessionId));
             Assert.That(data.DepartmentName, Is.EqualTo("Cardiology"));
+            Assert.That(data.ReminderEmailRequired, Is.True);
+            Assert.That(data.ReminderPushRequired, Is.False);
+            Assert.That(data.ReminderEmailSent, Is.False);
+            Assert.That(data.ReminderPushSent, Is.False);
+            Assert.That(data.ReminderSmsSent, Is.False);
         });
         _jobSchedulerMock.Verify(s => s.ScheduleReminderSms(It.IsAny<Guid>(), It.IsAny<DateTime>()), Times.Never);
         _jobSchedulerMock.Verify(s => s.EnqueueReminderSms(It.IsAny<Guid>()), Times.Never);
@@ -583,7 +588,8 @@ public class ConsultationSessionServiceTests
             Assert.That(notFound, Is.False);
             Assert.That(errors, Is.Empty);
             Assert.That(data, Is.Not.Null);
-            Assert.That(session.ReminderSmsSentAt, Is.Not.Null);
+            Assert.That(session.ReminderScheduledAt, Is.Not.Null);
+            Assert.That(session.ReminderSmsSentAt, Is.Null);
         });
         _jobSchedulerMock.Verify(s => s.EnqueueReminderSms(_sessionId), Times.Once);
         _jobSchedulerMock.Verify(s => s.ScheduleReminderSms(It.IsAny<Guid>(), It.IsAny<DateTime>()), Times.Never);
@@ -604,6 +610,8 @@ public class ConsultationSessionServiceTests
         var (succeeded, _, _, _) = await _service.CompleteSummaryAsync(_userId, _sessionId, CancellationToken.None);
 
         Assert.That(succeeded, Is.True);
+        Assert.That(session.ReminderScheduledAt, Is.Not.Null);
+        Assert.That(session.ReminderSmsSentAt, Is.Null);
         _jobSchedulerMock.Verify(s => s.ScheduleReminderSms(
             _sessionId,
             It.Is<DateTime>(dt => Math.Abs((dt - appointment.AddHours(-1)).TotalSeconds) < 1)), Times.Once);
@@ -736,13 +744,85 @@ public class ConsultationSessionServiceTests
         await _service.ProcessSendReminderSmsAsync(_sessionId, CancellationToken.None);
 
         Assert.That(session.ReminderSmsSentAt, Is.Not.Null);
+        Assert.That(session.ReminderPushSentAt, Is.Not.Null);
         _pushGatewayMock.Verify(g => g.SendAsync(It.IsAny<PushNotificationMessage>(), It.IsAny<CancellationToken>()), Times.Once);
+        _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.AtLeastOnce);
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task ProcessSendReminderSmsAsync_EmailFailsTransientlyPushSucceeds_PersistsPushAndThrows()
+    {
+        var session = MakeSession();
+        session.IsReminderEnabled = true;
+        session.AppointmentTime = DateTime.UtcNow.AddHours(1);
+        SetupSessionLookup(session);
+        _userServiceMock.Setup(u => u.GetUserByIdAsync(_userId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ApplicationUserResponse { Id = _userId, Email = "user@gmail.com" });
+        _medicalDepartmentServiceMock.Setup(m => m.GetMedicalDepartmentByIdAsync(_departmentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new MedicalDepartmentResponse { Id = _departmentId, DepartmentName = "Cardiology" });
+        _emailSenderMock.Setup(s => s.SendAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new TransientRemoteCallException("Brevo timeout", 504));
+        SetupPushDevices(new UserPushDeviceData(
+            Guid.NewGuid(),
+            _userId,
+            "ExponentPushToken[test]",
+            1,
+            "android",
+            true));
+        _pushGatewayMock.Setup(g => g.SendAsync(It.IsAny<PushNotificationMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PushSendResult(PushSendOutcome.Accepted, "ticket-1"));
+
+        Assert.ThrowsAsync<TransientRemoteCallException>(
+            async () => await _service.ProcessSendReminderSmsAsync(_sessionId, CancellationToken.None));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(session.ReminderPushSentAt, Is.Not.Null);
+            Assert.That(session.ReminderEmailSentAt, Is.Null);
+            Assert.That(session.ReminderSmsSentAt, Is.Null);
+        });
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Test]
     [Category("N")]
-    public async Task ProcessSendReminderSmsAsync_EmailFailsPushSucceeds_MarksSentAndSaves()
+    public async Task ProcessSendReminderSmsAsync_EmailAlreadySent_SkipsEmailAndCompletesPush()
+    {
+        var session = MakeSession();
+        session.IsReminderEnabled = true;
+        session.AppointmentTime = DateTime.UtcNow.AddHours(1);
+        session.ReminderEmailSentAt = DateTime.UtcNow.AddMinutes(-5);
+        SetupSessionLookup(session);
+        _userServiceMock.Setup(u => u.GetUserByIdAsync(_userId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ApplicationUserResponse { Id = _userId, Email = "user@gmail.com" });
+        _medicalDepartmentServiceMock.Setup(m => m.GetMedicalDepartmentByIdAsync(_departmentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new MedicalDepartmentResponse { Id = _departmentId, DepartmentName = "Cardiology" });
+        SetupPushDevices(new UserPushDeviceData(
+            Guid.NewGuid(),
+            _userId,
+            "ExponentPushToken[test]",
+            1,
+            "android",
+            true));
+        _pushGatewayMock.Setup(g => g.SendAsync(It.IsAny<PushNotificationMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PushSendResult(PushSendOutcome.Accepted, "ticket-1"));
+
+        await _service.ProcessSendReminderSmsAsync(_sessionId, CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(session.ReminderPushSentAt, Is.Not.Null);
+            Assert.That(session.ReminderSmsSentAt, Is.Not.Null);
+        });
+        _emailSenderMock.Verify(
+            s => s.SendAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task ProcessSendReminderSmsAsync_EmailTerminalFailPushSucceeds_DoesNotMarkFullySent()
     {
         var session = MakeSession();
         session.IsReminderEnabled = true;
@@ -766,7 +846,11 @@ public class ConsultationSessionServiceTests
 
         await _service.ProcessSendReminderSmsAsync(_sessionId, CancellationToken.None);
 
-        Assert.That(session.ReminderSmsSentAt, Is.Not.Null);
+        Assert.Multiple(() =>
+        {
+            Assert.That(session.ReminderPushSentAt, Is.Not.Null);
+            Assert.That(session.ReminderSmsSentAt, Is.Null);
+        });
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -810,9 +894,13 @@ public class ConsultationSessionServiceTests
 
         await _service.ProcessSendReminderSmsAsync(_sessionId, CancellationToken.None);
 
-        Assert.That(session.ReminderSmsSentAt, Is.Not.Null);
-        _sessionsRepoMock.Verify(r => r.Update(session), Times.Once);
-        _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Multiple(() =>
+        {
+            Assert.That(session.ReminderEmailSentAt, Is.Not.Null);
+            Assert.That(session.ReminderSmsSentAt, Is.Not.Null);
+        });
+        _sessionsRepoMock.Verify(r => r.Update(session), Times.AtLeastOnce);
+        _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.AtLeastOnce);
     }
 
     private void SetupSessionLookup(ConsultationSession? session)

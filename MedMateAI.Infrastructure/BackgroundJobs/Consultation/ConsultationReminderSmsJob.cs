@@ -1,3 +1,4 @@
+using Hangfire;
 using MedMateAI.Application.IService;
 
 namespace MedMateAI.Infrastructure.BackgroundJobs;
@@ -11,6 +12,7 @@ public sealed class ConsultationReminderSmsJob
         _consultationSessionService = consultationSessionService;
     }
 
+    [SessionJobAutomaticRetry]
     public Task ExecuteAsync(Guid sessionId)
     {
         return _consultationSessionService.ProcessSendReminderSmsAsync(sessionId);

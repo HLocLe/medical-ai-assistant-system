@@ -1,6 +1,7 @@
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using MedMateAI.Application.Common;
+using MedMateAI.Application.Helpers;
 using Microsoft.Extensions.Logging;
 
 namespace MedMateAI.Infrastructure.AI.Helpers;
@@ -27,15 +28,23 @@ internal static class AiHttpClientHelper
 
         if (!httpResponse.IsSuccessStatusCode)
         {
+            var statusCode = (int)httpResponse.StatusCode;
             var truncatedBody = Truncate(responseBody, 500);
             logger.LogWarning(
                 "{ServiceName} request failed with status code {StatusCode}. Response: {ResponseBody}",
                 serviceName,
-                (int)httpResponse.StatusCode,
+                statusCode,
                 truncatedBody);
 
-            throw new InvalidOperationException(
-                $"{serviceName} request failed with status code {(int)httpResponse.StatusCode}. Response: {truncatedBody}");
+            var message =
+                $"{serviceName} request failed with status code {statusCode}. Response: {truncatedBody}";
+
+            if (BackgroundJobRetry.IsTransientHttpStatusCode(statusCode))
+            {
+                throw new TransientRemoteCallException(message, statusCode);
+            }
+
+            throw new InvalidOperationException(message);
         }
 
         return responseBody;

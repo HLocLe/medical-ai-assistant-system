@@ -7,6 +7,6 @@ public sealed class HangfireLabTestJobScheduler : ILabTestJobScheduler
 {
     public void EnqueueOcr(Guid sessionId)
     {
-        BackgroundJob.Enqueue<LabTestOcrJob>(job => job.ExecuteAsync(sessionId));
+        BackgroundJob.Enqueue<LabTestOcrJob>(job => job.ExecuteAsync(sessionId, null!));
     }
 }

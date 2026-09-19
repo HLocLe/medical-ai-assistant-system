@@ -187,6 +187,19 @@ public static class DependencyInjection
             .Validate(x => x.AssignmentTimeoutMinutes is > 0 and <= 120,
                 "RecoveryPlan AssignmentTimeoutMinutes must be between 1 and 120.")
             .ValidateOnStart();
+        services.AddOptions<BackgroundJobRetryOptions>()
+            .Bind(configuration.GetSection(BackgroundJobRetryOptions.SectionName))
+            .Validate(
+                options => options.MaxAttempts is >= 1 and <= 20,
+                "BackgroundJobRetry MaxAttempts must be between 1 and 20.")
+            .Validate(
+                options =>
+                    options.RetryBaseSeconds is >= 1 and <= 3600
+                    && options.RetryMaxSeconds >= options.RetryBaseSeconds
+                    && options.RetryMaxSeconds <= 86400,
+                "BackgroundJobRetry retry settings are invalid.")
+            .ValidateOnStart();
+
         services.AddOptions<RecoveryPlanJobOptions>()
             .Bind(configuration.GetSection(RecoveryPlanJobOptions.SectionName))
             .Validate(

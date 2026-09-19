@@ -1,3 +1,4 @@
+using MedMateAI.Application.Common;
 using MedMateAI.Application.IService;
 using MedMateAI.Application.Service;
 using MedMateAI.Domain.Entities;
@@ -84,7 +85,7 @@ public class LabTestOcrProcessorTests
     }
 
     [Test]
-    public async Task ProcessAsync_AnalysisSucceeds_CompletesSessionAndAnalyzesResults()
+    public async Task ProcessAsync_AnalysisSucceeds_PersistsRawOcrAndAnalyzesResults()
     {
         var session = MakeSession(documentUrl: "https://example.com/doc.pdf");
         _labTestSessionsMock.Setup(repository => repository.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))
@@ -96,9 +97,9 @@ public class LabTestOcrProcessorTests
 
         Assert.Multiple(() =>
         {
-            Assert.That(session.Status, Is.EqualTo(LabTestSessionStatus.Completed));
             Assert.That(session.RawOcrText, Is.EqualTo("raw ocr text"));
             Assert.That(session.ProcessedAt, Is.Not.Null);
+            Assert.That(session.Status, Is.EqualTo(LabTestSessionStatus.Processing));
         });
         _unitOfWorkMock.Verify(unitOfWork => unitOfWork.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
         _resultAnalyzerMock.Verify(
@@ -106,7 +107,23 @@ public class LabTestOcrProcessorTests
     }
 
     [Test]
-    public async Task ProcessAsync_DocumentIntelligenceThrows_MarksSessionFailedAndSkipsAnalysis()
+    public async Task ProcessAsync_ExistingRawOcrText_SkipsOcrAndAnalyzes()
+    {
+        var session = MakeSession(documentUrl: "https://example.com/doc.pdf");
+        session.RawOcrText = "already extracted";
+        _labTestSessionsMock.Setup(repository => repository.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+
+        await _processor.ProcessAsync(session.Id, isFinalAttempt: false, CancellationToken.None);
+
+        _documentIntelligenceServiceMock.Verify(
+            service => service.AnalyzeFromUrlAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _resultAnalyzerMock.Verify(
+            analyzer => analyzer.AnalyzeAndPersistAsync(session.Id, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Test]
+    public async Task ProcessAsync_TerminalException_MarksSessionFailedAndSkipsAnalysis()
     {
         var session = MakeSession(documentUrl: "https://example.com/doc.pdf");
         _labTestSessionsMock.Setup(repository => repository.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))
@@ -123,7 +140,38 @@ public class LabTestOcrProcessorTests
     }
 
     [Test]
-    public async Task ProcessAsync_ResultAnalyzerThrows_MarksSessionFailedAfterCompleting()
+    public void ProcessAsync_TransientException_NotFinalAttempt_RethrowsAndKeepsProcessing()
+    {
+        var session = MakeSession(documentUrl: "https://example.com/doc.pdf");
+        _labTestSessionsMock.Setup(repository => repository.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _documentIntelligenceServiceMock.Setup(service => service.AnalyzeFromUrlAsync(session.DocumentUrl!, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new TransientRemoteCallException("timeout", statusCode: 504));
+
+        Assert.ThrowsAsync<TransientRemoteCallException>(
+            async () => await _processor.ProcessAsync(session.Id, isFinalAttempt: false, CancellationToken.None));
+
+        Assert.That(session.Status, Is.EqualTo(LabTestSessionStatus.Processing));
+        _unitOfWorkMock.Verify(unitOfWork => unitOfWork.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Test]
+    public async Task ProcessAsync_TransientException_FinalAttempt_MarksSessionFailed()
+    {
+        var session = MakeSession(documentUrl: "https://example.com/doc.pdf");
+        _labTestSessionsMock.Setup(repository => repository.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _documentIntelligenceServiceMock.Setup(service => service.AnalyzeFromUrlAsync(session.DocumentUrl!, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new TimeoutException("timed out"));
+
+        await _processor.ProcessAsync(session.Id, isFinalAttempt: true, CancellationToken.None);
+
+        Assert.That(session.Status, Is.EqualTo(LabTestSessionStatus.Failed));
+        _unitOfWorkMock.Verify(unitOfWork => unitOfWork.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Test]
+    public async Task ProcessAsync_ResultAnalyzerThrowsTerminal_MarksSessionFailedAfterOcrPersist()
     {
         var session = MakeSession(documentUrl: "https://example.com/doc.pdf");
         _labTestSessionsMock.Setup(repository => repository.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))

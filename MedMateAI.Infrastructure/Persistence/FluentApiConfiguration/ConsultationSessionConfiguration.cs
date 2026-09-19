@@ -34,6 +34,15 @@ public sealed class ConsultationSessionConfiguration : IEntityTypeConfiguration<
         builder.Property(x => x.IsReminderEnabled)
             .HasDefaultValue(false);
 
+        builder.Property(x => x.ReminderScheduledAt)
+            .HasColumnType("timestamp with time zone");
+
+        builder.Property(x => x.ReminderEmailSentAt)
+            .HasColumnType("timestamp with time zone");
+
+        builder.Property(x => x.ReminderPushSentAt)
+            .HasColumnType("timestamp with time zone");
+
         builder.Property(x => x.ReminderSmsSentAt)
             .HasColumnType("timestamp with time zone");
 

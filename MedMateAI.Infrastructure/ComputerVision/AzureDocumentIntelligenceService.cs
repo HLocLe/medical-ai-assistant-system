@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using MedMateAI.Application.Common;
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.IService;
 using MedMateAI.Infrastructure.ComputerVision.DTOs;
 using MedMateAI.Infrastructure.ComputerVision.Options;
@@ -87,13 +89,13 @@ public sealed class AzureDocumentIntelligenceService : IDocumentIntelligenceServ
 
         if (!response.IsSuccessStatusCode)
         {
+            var statusCode = (int)response.StatusCode;
             _logger.LogWarning(
                 "Azure Document Intelligence analyze request failed with status {StatusCode}. Response: {ResponseBody}",
-                (int)response.StatusCode,
+                statusCode,
                 Truncate(responseBody, 500));
 
-            throw new InvalidOperationException(
-                $"Azure Document Intelligence analyze failed with status {(int)response.StatusCode}.");
+            ThrowAzureHttpFailure("analyze", statusCode);
         }
 
         if (!response.Headers.TryGetValues("Operation-Location", out var operationLocations))
@@ -132,13 +134,13 @@ public sealed class AzureDocumentIntelligenceService : IDocumentIntelligenceServ
 
             if (!pollResponse.IsSuccessStatusCode)
             {
+                var statusCode = (int)pollResponse.StatusCode;
                 _logger.LogWarning(
                     "Azure Document Intelligence poll failed with status {StatusCode}. Response: {ResponseBody}",
-                    (int)pollResponse.StatusCode,
+                    statusCode,
                     Truncate(pollBody, 500));
 
-                throw new InvalidOperationException(
-                    $"Azure Document Intelligence poll failed with status {(int)pollResponse.StatusCode}.");
+                ThrowAzureHttpFailure("poll", statusCode);
             }
 
             var result = JsonSerializer.Deserialize<AzureAnalyzeOperationResponse>(pollBody, JsonOptions)
@@ -187,6 +189,17 @@ public sealed class AzureDocumentIntelligenceService : IDocumentIntelligenceServ
             : _options.ApiVersion.Trim();
 
         return $"{endpoint}documentintelligence/documentModels/{modelId}:analyze?api-version={apiVersion}";
+    }
+
+    private static void ThrowAzureHttpFailure(string operation, int statusCode)
+    {
+        var message = $"Azure Document Intelligence {operation} failed with status {statusCode}.";
+        if (BackgroundJobRetry.IsTransientHttpStatusCode(statusCode))
+        {
+            throw new TransientRemoteCallException(message, statusCode);
+        }
+
+        throw new InvalidOperationException(message);
     }
 
     private static string Truncate(string value, int maxLength)

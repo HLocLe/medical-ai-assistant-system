@@ -34,6 +34,19 @@ public sealed class ConsultationSummaryResponse
 
     public bool IsReminderEnabled { get; set; }
 
+    /// <summary>True when the user has an email that can receive the reminder.</summary>
+    public bool ReminderEmailRequired { get; set; }
+
+    /// <summary>True when the user has at least one active push device.</summary>
+    public bool ReminderPushRequired { get; set; }
+
+    /// <summary>True after the email channel succeeded (only meaningful when ReminderEmailRequired).</summary>
+    public bool ReminderEmailSent { get; set; }
+
+    /// <summary>True after the push channel succeeded (only meaningful when ReminderPushRequired).</summary>
+    public bool ReminderPushSent { get; set; }
+
+    /// <summary>True when every required channel has succeeded.</summary>
     public bool ReminderSmsSent { get; set; }
 
     public IReadOnlyList<ChecklistItemResponse> ChecklistItems { get; set; } = [];
