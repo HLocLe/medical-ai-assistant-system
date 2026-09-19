@@ -7,7 +7,7 @@ public sealed class HangfireConsultationSessionJobScheduler : IConsultationSessi
 {
     public void EnqueueGenerateDoctorQuestions(Guid sessionId)
     {
-        BackgroundJob.Enqueue<ConsultationDoctorQuestionsJob>(job => job.ExecuteAsync(sessionId));
+        BackgroundJob.Enqueue<ConsultationDoctorQuestionsJob>(job => job.ExecuteAsync(sessionId, null!));
     }
 
     public void EnqueueReminderSms(Guid sessionId)

@@ -12,6 +12,8 @@ using MedMateAI.Application.DTOs.WebChatbot.Requests;
 
 using MedMateAI.Application.DTOs.WebChatbot.Responses;
 
+using MedMateAI.Application.Helpers;
+
 using MedMateAI.Application.IService;
 
 using MedMateAI.Application.Models.Notifications;
@@ -539,219 +541,132 @@ public sealed partial class ConsultationSessionService : IConsultationSessionSer
 
 
 
-    public async Task ProcessGenerateDoctorQuestionsAsync(
-
+    public Task ProcessGenerateDoctorQuestionsAsync(
         Guid sessionId,
+        CancellationToken cancellationToken = default) =>
+        ProcessGenerateDoctorQuestionsAsync(sessionId, isFinalAttempt: true, cancellationToken);
 
+    public async Task ProcessGenerateDoctorQuestionsAsync(
+        Guid sessionId,
+        bool isFinalAttempt,
         CancellationToken cancellationToken = default)
-
     {
-
         if (sessionId == Guid.Empty)
-
         {
-
             return;
-
         }
-
-
 
         var session = await _consultationSessions.FirstOrDefaultAsync(
-
             x => !x.IsDeleted && x.Id == sessionId,
-
             cancellationToken: cancellationToken);
-
-
 
         if (session is null || session.Status != ConsultationSessionStatus.Processing)
-
         {
-
             return;
-
         }
-
-
 
         var department = await _medicalDepartmentService.GetMedicalDepartmentByIdAsync(
-
             session.DepartmentId,
-
             cancellationToken);
-
         var departmentName = department?.DepartmentName?.Trim();
-
         if (string.IsNullOrWhiteSpace(departmentName))
-
         {
-
             await MarkSessionFailedAsync(session, cancellationToken);
-
             return;
-
         }
-
-
 
         var aiConfig = await _aiConfigService.GetActiveAIConfigByTaskTypeAsync(
-
             DoctorQuestionsTaskType,
-
             cancellationToken);
 
-
-
         if (aiConfig is null || string.IsNullOrWhiteSpace(aiConfig.SystemPrompt))
-
         {
-
             await MarkSessionFailedAsync(session, cancellationToken);
-
             return;
-
         }
-
-
 
         var departmentQuestions = await _unitOfWork.DepartmentConsultationQuestions.GetAllAsync(
-
             question => !question.IsDeleted
-
                 && question.IsActive
-
                 && question.DepartmentId == session.DepartmentId,
-
             query => query
-
                 .OrderBy(question => question.Category)
-
                 .ThenBy(question => question.SortOrder)
-
                 .ThenBy(question => question.QuestionText),
-
             cancellationToken: cancellationToken);
 
-
-
         if (departmentQuestions.Count == 0)
-
         {
-
             await MarkSessionFailedAsync(session, cancellationToken);
-
             return;
-
         }
-
-
 
         var trimmedSymptoms = session.UserSymptoms?.Trim() ?? string.Empty;
-
         var userPrompt = BuildUserPrompt(
-
             departmentName,
-
             trimmedSymptoms,
-
             departmentQuestions);
 
-
-
         AIProviderChatResult aiResult;
-
         try
-
         {
-
             aiResult = await _aiChatProvider.GenerateAsync(
-
                 new AIProviderChatRequest
-
                 {
-
                     SystemPrompt = aiConfig.SystemPrompt.Trim(),
-
                     UserMessage = userPrompt,
-
                     Model = aiConfig.Model ?? string.Empty,
-
                     Temperature = aiConfig.Temperature,
-
                     MaxTokens = aiConfig.MaxTokens,
-
                 },
-
                 cancellationToken);
-
         }
-
-        catch (InvalidOperationException)
-
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            throw;
+        }
+        catch (Exception ex) when (BackgroundJobRetry.IsRetryable(ex))
+        {
+            if (!isFinalAttempt)
+            {
+                throw;
+            }
 
             await MarkSessionFailedAsync(session, cancellationToken);
-
             return;
-
         }
-
-
+        catch (Exception)
+        {
+            await MarkSessionFailedAsync(session, cancellationToken);
+            return;
+        }
 
         if (!TryParseDoctorQuestionsJson(aiResult.Content, out var questions))
-
         {
-
             await MarkSessionFailedAsync(session, cancellationToken);
-
             return;
-
         }
-
-
 
         var utcNow = DateTime.UtcNow;
-
         var priority = 0;
-
         foreach (var question in questions)
-
         {
-
             _consultationQuestions.Add(new ConsultationQuestion
-
             {
-
                 Id = Guid.NewGuid(),
-
                 ConsultationSessionId = session.Id,
-
                 Category = question.Category,
-
                 QuestionText = question.Question,
-
                 Priority = priority++,
-
                 CreatedAt = utcNow,
-
             });
-
         }
 
-
-
         session.Status = ConsultationSessionStatus.Completed;
-
         session.UpdatedAt = utcNow;
-
         _consultationSessions.Update(session);
-
         await _unitOfWork.SaveChangesAsync(cancellationToken);
-
     }
-
-
 
     public async Task<PagedResponse<ConsultationSessionSummaryResponse>> GetMyCompletedSessionsAsync(
 

@@ -18,6 +18,11 @@ public interface IConsultationSessionService
         Guid sessionId,
         CancellationToken cancellationToken = default);
 
+    Task ProcessGenerateDoctorQuestionsAsync(
+        Guid sessionId,
+        bool isFinalAttempt,
+        CancellationToken cancellationToken = default);
+
     Task ProcessSendReminderSmsAsync(
         Guid sessionId,
         CancellationToken cancellationToken = default);

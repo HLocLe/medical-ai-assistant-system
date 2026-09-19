@@ -22,6 +22,16 @@ public sealed class ConsultationSession : BaseEntity
 
     public bool IsReminderEnabled { get; set; }
 
+    /// <summary>When the Hangfire reminder job was scheduled/enqueued.</summary>
+    public DateTime? ReminderScheduledAt { get; set; }
+
+    /// <summary>When the reminder email channel succeeded (skip on Hangfire retry).</summary>
+    public DateTime? ReminderEmailSentAt { get; set; }
+
+    /// <summary>When the reminder push channel succeeded (skip on Hangfire retry).</summary>
+    public DateTime? ReminderPushSentAt { get; set; }
+
+    /// <summary>When all required reminder channels succeeded.</summary>
     public DateTime? ReminderSmsSentAt { get; set; }
 
     public MedicalDepartment Department { get; set; } = null!;
