@@ -514,7 +514,6 @@ public sealed class SaleCampaignService : ISaleCampaignService
             {
                 campaign.CampaignPlans.Add(new SaleCampaignPlan
                 {
-                    Id = Guid.NewGuid(),
                     PlanId = item.PlanId,
                     SalePrice = item.SalePrice,
                     BonusCredit = item.BonusCredit,
