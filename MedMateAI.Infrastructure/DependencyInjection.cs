@@ -96,9 +96,15 @@ public static class DependencyInjection
         services.AddScoped<ISaleCampaignRepository, SaleCampaignRepository>();
         services.AddScoped<ISaleRedemptionRepository, SaleRedemptionRepository>();
         services.AddScoped<
+            ISaleCampaignAnalyticsRepository,
+            SaleCampaignAnalyticsRepository>();
+        services.AddScoped<
             ISaleCampaignAnnouncementRepository,
             SaleCampaignAnnouncementRepository>();
         services.AddScoped<ISaleCampaignService, SaleCampaignService>();
+        services.AddScoped<
+            ISaleCampaignAnalyticsService,
+            SaleCampaignAnalyticsService>();
         services.AddScoped<ISaleRedemptionService, SaleRedemptionService>();
         services.AddScoped<
             ISaleCampaignAnnouncementContextService,
@@ -151,6 +157,7 @@ public static class DependencyInjection
             RecoveryPlanCompletionProcessor>();
         services.AddScoped<IMedicationReminderScheduler, MedicationReminderScheduler>();
         services.AddScoped<IUserPushDeviceService, UserPushDeviceService>();
+        services.AddSingleton<TimeProvider>(TimeProvider.System);
 
         //
         services.AddOptions<PayOSOptions>()
