@@ -14,10 +14,14 @@ namespace MedMateAI.Controllers;
 public sealed class AdminSaleCampaignsController : ControllerBase
 {
     private readonly ISaleCampaignService _service;
+    private readonly ISaleCampaignAnalyticsService _analyticsService;
 
-    public AdminSaleCampaignsController(ISaleCampaignService service)
+    public AdminSaleCampaignsController(
+        ISaleCampaignService service,
+        ISaleCampaignAnalyticsService analyticsService)
     {
         _service = service;
+        _analyticsService = analyticsService;
     }
 
     [HttpGet]
@@ -139,6 +143,26 @@ public sealed class AdminSaleCampaignsController : ControllerBase
             cancellationToken);
         return data is null
             ? NotFound(Failure<PagedResponse<SaleRedemptionResponse>>(
+                "Sale campaign not found."))
+            : Ok(Success(data));
+    }
+
+    [HttpGet("{id:guid}/revenue-impact")]
+    [ProducesResponseType(
+        typeof(ApiResponse<SaleRevenueImpactResponse>),
+        StatusCodes.Status200OK)]
+    [ProducesResponseType(
+        typeof(ApiResponse<SaleRevenueImpactResponse>),
+        StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetRevenueImpact(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        var data = await _analyticsService.GetRevenueImpactAsync(
+            id,
+            cancellationToken);
+        return data is null
+            ? NotFound(Failure<SaleRevenueImpactResponse>(
                 "Sale campaign not found."))
             : Ok(Success(data));
     }
