@@ -173,6 +173,38 @@ public sealed class SaleCampaignAnalyticsRepositoryTests
         });
     }
 
+    [Test]
+    public void DailyQueries_NpgsqlProvider_TranslateWithoutDatabase()
+    {
+        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseNpgsql(
+                "Host=localhost;Database=translation_probe;"
+                + "Username=probe;Password=probe")
+            .Options;
+        using var context = new ApplicationDbContext(options);
+        var repository = new SaleCampaignAnalyticsRepository(context);
+
+        var totalSql = repository.BuildTotalRevenueDailyQuery(
+                Utc(2026, 9, 20, 15),
+                Utc(2026, 9, 22, 15))
+            .ToQueryString();
+        var campaignSql = repository.BuildCampaignRevenueDailyQuery(
+                Guid.NewGuid(),
+                Utc(2026, 9, 20, 15),
+                Utc(2026, 9, 22, 15))
+            .ToQueryString();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(totalSql, Is.Not.Empty);
+            Assert.That(totalSql, Does.Contain("GROUP BY"));
+            Assert.That(totalSql, Does.Contain("ORDER BY"));
+            Assert.That(campaignSql, Is.Not.Empty);
+            Assert.That(campaignSql, Does.Contain("GROUP BY"));
+            Assert.That(campaignSql, Does.Contain("ORDER BY"));
+        });
+    }
+
     private void AddRedemption(
         Guid campaignId,
         decimal originalPrice,
