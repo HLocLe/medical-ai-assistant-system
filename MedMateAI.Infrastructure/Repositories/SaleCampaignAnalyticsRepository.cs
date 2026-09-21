@@ -125,38 +125,14 @@ public sealed class SaleCampaignAnalyticsRepository
             return Array.Empty<SaleRevenueDailyData>();
         }
 
-        var totals = await _context.Payments
-            .AsNoTracking()
-            .Where(payment =>
-                !payment.IsDeleted
-                && payment.Status == PaymentStatus.Paid
-                && payment.PaidAt.HasValue
-                && payment.PaidAt.Value >= periodStart
-                && payment.PaidAt.Value < periodEnd)
-            .GroupBy(payment => payment.PaidAt!.Value.Date)
-            .Select(group => new TotalRevenueDailyProjection(
-                group.Key,
-                group.Sum(payment => payment.Amount),
-                group.LongCount()))
-            .OrderBy(item => item.Date)
+        var totals = await BuildTotalRevenueDailyQuery(
+                periodStart,
+                periodEnd)
             .ToListAsync(cancellationToken);
-        var campaignTotals = await _context.SaleRedemptions
-            .AsNoTracking()
-            .Where(redemption =>
-                !redemption.IsDeleted
-                && redemption.Status == SaleRedemptionStatus.Completed
-                && redemption.SaleCampaignId == campaignId
-                && !redemption.Payment.IsDeleted
-                && redemption.Payment.Status == PaymentStatus.Paid
-                && redemption.Payment.PaidAt.HasValue
-                && redemption.Payment.PaidAt.Value >= periodStart
-                && redemption.Payment.PaidAt.Value < periodEnd)
-            .GroupBy(redemption => redemption.Payment.PaidAt!.Value.Date)
-            .Select(group => new CampaignRevenueDailyProjection(
-                group.Key,
-                group.Sum(redemption => redemption.Payment.Amount),
-                group.LongCount()))
-            .OrderBy(item => item.Date)
+        var campaignTotals = await BuildCampaignRevenueDailyQuery(
+                campaignId,
+                periodStart,
+                periodEnd)
             .ToListAsync(cancellationToken);
         var campaignByDate = campaignTotals.ToDictionary(item => item.Date);
 
@@ -173,6 +149,51 @@ public sealed class SaleCampaignAnalyticsRepository
                     period);
             })
             .ToList();
+    }
+
+    internal IQueryable<TotalRevenueDailyProjection> BuildTotalRevenueDailyQuery(
+        DateTime periodStart,
+        DateTime periodEnd)
+    {
+        return _context.Payments
+            .AsNoTracking()
+            .Where(payment =>
+                !payment.IsDeleted
+                && payment.Status == PaymentStatus.Paid
+                && payment.PaidAt.HasValue
+                && payment.PaidAt.Value >= periodStart
+                && payment.PaidAt.Value < periodEnd)
+            .GroupBy(payment => payment.PaidAt!.Value.Date)
+            .OrderBy(group => group.Key)
+            .Select(group => new TotalRevenueDailyProjection(
+                group.Key,
+                group.Sum(payment => payment.Amount),
+                group.LongCount()));
+    }
+
+    internal IQueryable<CampaignRevenueDailyProjection>
+        BuildCampaignRevenueDailyQuery(
+            Guid campaignId,
+            DateTime periodStart,
+            DateTime periodEnd)
+    {
+        return _context.SaleRedemptions
+            .AsNoTracking()
+            .Where(redemption =>
+                !redemption.IsDeleted
+                && redemption.Status == SaleRedemptionStatus.Completed
+                && redemption.SaleCampaignId == campaignId
+                && !redemption.Payment.IsDeleted
+                && redemption.Payment.Status == PaymentStatus.Paid
+                && redemption.Payment.PaidAt.HasValue
+                && redemption.Payment.PaidAt.Value >= periodStart
+                && redemption.Payment.PaidAt.Value < periodEnd)
+            .GroupBy(redemption => redemption.Payment.PaidAt!.Value.Date)
+            .OrderBy(group => group.Key)
+            .Select(group => new CampaignRevenueDailyProjection(
+                group.Key,
+                group.Sum(redemption => redemption.Payment.Amount),
+                group.LongCount()));
     }
 
     public async Task<SaleCampaignPaidSummaryData> GetCampaignPaidSummaryAsync(
@@ -202,12 +223,12 @@ public sealed class SaleCampaignAnalyticsRepository
         return aggregate ?? SaleCampaignPaidSummaryData.Empty;
     }
 
-    private sealed record TotalRevenueDailyProjection(
+    internal sealed record TotalRevenueDailyProjection(
         DateTime Date,
         decimal TotalRevenue,
         long PaidOrders);
 
-    private sealed record CampaignRevenueDailyProjection(
+    internal sealed record CampaignRevenueDailyProjection(
         DateTime Date,
         decimal CampaignRevenue,
         long CampaignOrders);
