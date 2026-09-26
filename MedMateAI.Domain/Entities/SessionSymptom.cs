@@ -6,6 +6,8 @@ public sealed class SessionSymptom : BaseEntity
 
     public string? SymptomName { get; set; }
 
+    public string? Icd10Code { get; set; }
+
     public double? ConfidenceScore { get; set; }
 
     public string? ExtractedText { get; set; }
