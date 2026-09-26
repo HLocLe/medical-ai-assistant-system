@@ -12,5 +12,8 @@ public sealed class SessionSymptomConfiguration : IEntityTypeConfiguration<Sessi
 
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Id).HasColumnName("SessionSymptomId").ValueGeneratedOnAdd();
+
+        builder.Property(x => x.Icd10Code)
+            .HasMaxLength(32);
     }
 }

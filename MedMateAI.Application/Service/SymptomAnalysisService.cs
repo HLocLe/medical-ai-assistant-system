@@ -946,8 +946,9 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
                 Id = Guid.NewGuid(),
                 SymptomAnalysisSessionId = sessionId,
                 SymptomName = diagnosis.DiseaseName,
+                Icd10Code = string.IsNullOrWhiteSpace(diagnosis.Icd10Code) ? null : diagnosis.Icd10Code.Trim(),
                 ConfidenceScore = diagnosis.PAGivenB,
-                ExtractedText =diagnosis.ClinicalReasoning,
+                ExtractedText = diagnosis.ClinicalReasoning,
                 CreatedAt = DateTime.UtcNow,
             });
         }
