@@ -1,7 +1,9 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using MedMateAI.Application.Common;
 using MedMateAI.Application.DTOs.WebChatbot.Requests;
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.DTOs.WebChatbot.Responses;
 using MedMateAI.Application.IService;
 using MedMateAI.Infrastructure.AI.DTOs.OpenRouter;
@@ -110,12 +112,21 @@ public sealed class OpenRouterChatProvider : IAIChatProvider
 
         if (!httpResponse.IsSuccessStatusCode)
         {
-            _logger.LogWarning(
-                "OpenRouter request failed with status code {StatusCode}.",
-                (int)httpResponse.StatusCode);
+            var statusCode = (int)httpResponse.StatusCode;
+            var truncatedBody = Truncate(responseBody, 500);
+            var message = $"OpenRouter request failed with status code {statusCode}. Response: {truncatedBody}";
 
-            throw new InvalidOperationException(
-                $"OpenRouter request failed with status code {(int)httpResponse.StatusCode}. Response: {Truncate(responseBody, 500)}");
+            _logger.LogWarning(
+                "OpenRouter request failed with status code {StatusCode}. Response: {ResponseBody}",
+                statusCode,
+                truncatedBody);
+
+            if (BackgroundJobRetry.IsTransientHttpStatusCode(statusCode))
+            {
+                throw new TransientRemoteCallException(message, statusCode);
+            }
+
+            throw new InvalidOperationException(message);
         }
 
         OpenRouterResponse? response;
@@ -140,9 +151,7 @@ public sealed class OpenRouterChatProvider : IAIChatProvider
 
         if (string.IsNullOrWhiteSpace(content))
         {
-
-            throw new InvalidOperationException("OpenRouter response does not contain message content.");
-
+            throw new TransientRemoteCallException("OpenRouter response does not contain message content.");
         }
 
         return new AIProviderChatResult

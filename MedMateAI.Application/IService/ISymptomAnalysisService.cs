@@ -36,6 +36,15 @@ public interface ISymptomAnalysisService
         SubmitClinicalQuestionAnswersRequest request,
         CancellationToken cancellationToken = default);
 
+    Task ProcessAnalyzeAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default);
+
+    Task ProcessAnalyzeAsync(
+        Guid sessionId,
+        bool isFinalAttempt,
+        CancellationToken cancellationToken = default);
+
     Task<SymptomAnalysisQuotaResponse?> GetQuotaAsync(
         CancellationToken cancellationToken = default);
 }

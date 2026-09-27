@@ -5,12 +5,14 @@ using MedMateAI.Application.DTOs.LabIndicators.Responses;
 using MedMateAI.Application.DTOs.LabTests.Requests;
 using MedMateAI.Application.DTOs.LabTests.Responses;
 using MedMateAI.Application.DTOs.WebChatbot.Requests;
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.IService;
 using MedMateAI.Application.Models.ServiceCredits;
 using MedMateAI.Domain.Common;
 using MedMateAI.Domain.Entities;
 using MedMateAI.Domain.Enums;
 using MedMateAI.Domain.Persistence;
+using Microsoft.Extensions.Logging;
 
 namespace MedMateAI.Application.Service;
 
@@ -35,6 +37,7 @@ public sealed class LabTestService : ILabTestService
     private readonly ILabTestQuotaService _quotaService;
     private readonly IAIConfigService _aiConfigService;
     private readonly IAIChatProvider _aiChatProvider;
+    private readonly ILogger<LabTestService> _logger;
 
     public LabTestService(
         IUnitOfWork unitOfWork,
@@ -42,7 +45,8 @@ public sealed class LabTestService : ILabTestService
         ILabTestResultAnalyzer resultAnalyzer,
         ILabTestQuotaService quotaService,
         IAIConfigService aiConfigService,
-        IAIChatProvider aiChatProvider)
+        IAIChatProvider aiChatProvider,
+        ILogger<LabTestService> logger)
     {
         _unitOfWork = unitOfWork;
         _jobScheduler = jobScheduler;
@@ -50,6 +54,7 @@ public sealed class LabTestService : ILabTestService
         _quotaService = quotaService;
         _aiConfigService = aiConfigService;
         _aiChatProvider = aiChatProvider;
+        _logger = logger;
     }
 
     public async Task<(bool Succeeded, IEnumerable<string> Errors, LabTestUploadResponse? Data)> AnalyzeFromDocumentUrlAsync(
@@ -233,7 +238,7 @@ public sealed class LabTestService : ILabTestService
             .ToList();
     }
 
-    public async Task<(bool Succeeded, IEnumerable<string> Errors, string? Data)> SummarizeSessionAsync(
+    public async Task<(bool Succeeded, IEnumerable<string> Errors, LabTestSummaryResponse? Data)> SummarizeSessionAsync(
         Guid userId,
         Guid sessionId,
         CancellationToken cancellationToken = default)
@@ -261,34 +266,12 @@ public sealed class LabTestService : ILabTestService
 
         if (!string.IsNullOrWhiteSpace(session.AiSummary))
         {
-            return (true, Array.Empty<string>(), session.AiSummary);
+            return (true, Array.Empty<string>(), BuildSummaryResponse(sessionId, LabTestSummaryStatus.Completed, session.AiSummary));
         }
 
-        var aiConfig = await _aiConfigService.GetActiveAIConfigByTaskTypeAsync(
-            LabTestSummaryTaskType,
-            cancellationToken);
-
-        if (aiConfig is null || string.IsNullOrWhiteSpace(aiConfig.SystemPrompt))
+        if (session.AiSummaryStatus == LabTestSummaryStatus.Processing)
         {
-            return (false, new[] { $"Chưa cấu hình AI System Prompt cho tác vụ '{LabTestSummaryTaskType}'" }, null);
-        }
-
-        var userMessage = BuildSummaryUserMessage(session);
-        var aiResult = await _aiChatProvider.GenerateAsync(
-            new AIProviderChatRequest
-            {
-                SystemPrompt = aiConfig.SystemPrompt,
-                UserMessage = userMessage,
-                Model = aiConfig.Model ?? string.Empty,
-                Temperature = aiConfig.Temperature,
-                MaxTokens = aiConfig.MaxTokens,
-            },
-            cancellationToken);
-
-        var summary = aiResult.Content?.Trim();
-        if (string.IsNullOrWhiteSpace(summary))
-        {
-            return (false, new[] { "Không thể tạo tóm tắt bằng AI vào lúc này" }, null);
+            return (true, Array.Empty<string>(), BuildSummaryResponse(sessionId, LabTestSummaryStatus.Processing, null));
         }
 
         var trackedSession = await _unitOfWork.LabTestSessions.GetByIdAsync(sessionId, cancellationToken);
@@ -297,13 +280,140 @@ public sealed class LabTestService : ILabTestService
             return (false, new[] { "Không tìm thấy phiên xét nghiệm" }, null);
         }
 
-        trackedSession.AiSummary = summary;
+        trackedSession.AiSummaryStatus = LabTestSummaryStatus.Processing;
         trackedSession.UpdatedAt = DateTime.UtcNow;
         _unitOfWork.LabTestSessions.Update(trackedSession);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        return (true, Array.Empty<string>(), summary);
+        _jobScheduler.EnqueueSummary(sessionId);
+
+        return (true, Array.Empty<string>(), BuildSummaryResponse(sessionId, LabTestSummaryStatus.Processing, null));
     }
+
+    public async Task ProcessSummaryAsync(
+        Guid sessionId,
+        bool isFinalAttempt,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionId == Guid.Empty)
+        {
+            return;
+        }
+
+        var session = await _unitOfWork.LabTestSessionDetails.GetByIdWithResultsAsync(sessionId, cancellationToken);
+        if (session is null || session.AiSummaryStatus != LabTestSummaryStatus.Processing)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.AiSummary))
+        {
+            await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Completed, session.AiSummary, cancellationToken);
+            return;
+        }
+
+        if (session.Status != LabTestSessionStatus.Completed || session.LabTestResultDetails.Count == 0)
+        {
+            await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Failed, null, cancellationToken);
+            return;
+        }
+
+        try
+        {
+            var aiConfig = await _aiConfigService.GetActiveAIConfigByTaskTypeAsync(
+                LabTestSummaryTaskType,
+                cancellationToken);
+
+            if (aiConfig is null || string.IsNullOrWhiteSpace(aiConfig.SystemPrompt))
+            {
+                _logger.LogError(
+                    "Lab test summary failed for session {SessionId}: missing AI config for task type {TaskType}.",
+                    sessionId,
+                    LabTestSummaryTaskType);
+                await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Failed, null, cancellationToken);
+                return;
+            }
+
+            var aiResult = await _aiChatProvider.GenerateAsync(
+                new AIProviderChatRequest
+                {
+                    SystemPrompt = aiConfig.SystemPrompt,
+                    UserMessage = BuildSummaryUserMessage(session),
+                    Model = aiConfig.Model ?? string.Empty,
+                    Temperature = aiConfig.Temperature,
+                    MaxTokens = aiConfig.MaxTokens,
+                },
+                cancellationToken);
+
+            var summary = aiResult.Content?.Trim();
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                _logger.LogWarning("Lab test summary returned empty content for session {SessionId}.", sessionId);
+                await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Failed, null, cancellationToken);
+                return;
+            }
+
+            await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Completed, summary, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (BackgroundJobRetry.IsRetryable(ex))
+        {
+            _logger.LogWarning(
+                ex,
+                "Lab test summary hit a transient failure for session {SessionId}. FinalAttempt={IsFinalAttempt}.",
+                sessionId,
+                isFinalAttempt);
+
+            if (!isFinalAttempt)
+            {
+                throw;
+            }
+
+            await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Failed, null, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Lab test summary failed for session {SessionId}.", sessionId);
+            await UpdateSummaryStateAsync(sessionId, LabTestSummaryStatus.Failed, null, cancellationToken);
+        }
+    }
+
+    private async Task UpdateSummaryStateAsync(
+        Guid sessionId,
+        LabTestSummaryStatus status,
+        string? summary,
+        CancellationToken cancellationToken)
+    {
+        var trackedSession = await _unitOfWork.LabTestSessions.GetByIdAsync(sessionId, cancellationToken);
+        if (trackedSession is null)
+        {
+            return;
+        }
+
+        trackedSession.AiSummaryStatus = status;
+        if (summary is not null)
+        {
+            trackedSession.AiSummary = summary;
+        }
+
+        trackedSession.UpdatedAt = DateTime.UtcNow;
+        _unitOfWork.LabTestSessions.Update(trackedSession);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+    }
+
+    private static LabTestSummaryResponse BuildSummaryResponse(
+        Guid sessionId,
+        LabTestSummaryStatus status,
+        string? summary) =>
+        new()
+        {
+            SessionId = sessionId,
+            Status = status,
+            AiSummary = summary,
+        };
 
     private static string BuildSummaryUserMessage(LabTestSession session)
     {
@@ -385,6 +495,7 @@ public sealed class LabTestService : ILabTestService
             PatientAgeAtTest = session.PatientAgeAtTest,
             ProcessedAt = session.ProcessedAt,
             AiSummary = session.AiSummary,
+            AiSummaryStatus = session.AiSummaryStatus,
             Results = session.LabTestResultDetails
                 .OrderBy(x => x.CreatedAt)
                 .Select(MapResultItem)

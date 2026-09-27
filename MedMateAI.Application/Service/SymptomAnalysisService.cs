@@ -3,13 +3,13 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using AutoMapper;
 using MedMateAI.Application.DTOs.Common;
-using MedMateAI.Application.DTOs.MedicalFacilities.Responses;
 using MedMateAI.Application.DTOs.SymptomAnalysis.Requests;
 using MedMateAI.Application.DTOs.SymptomAnalysis.Responses.Session;
 using MedMateAI.Application.DTOs.SymptomAnalysis.Responses.ClinicalQuestions;
 using MedMateAI.Application.DTOs.SymptomAnalysis.Responses.MedGemma;
 using MedMateAI.Application.DTOs.SymptomAnalysis.Responses.Quota;
 using MedMateAI.Application.Common.Time;
+using MedMateAI.Application.Helpers;
 using MedMateAI.Application.IService;
 using MedMateAI.Application.Models.ServiceCredits;
 using MedMateAI.Domain.Common;
@@ -42,6 +42,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     private readonly IMedGemmaChatService _medGemmaChatService;
     private readonly IIcdLookupService _icdLookupService;
     private readonly ISymptomAnalysisQuotaService _quotaService;
+    private readonly ISymptomAnalysisJobScheduler _jobScheduler;
     private readonly IMapper _mapper;
     private readonly ILogger<SymptomAnalysisService> _logger;
 
@@ -52,6 +53,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         IMedGemmaChatService medGemmaChatService,
         IIcdLookupService icdLookupService,
         ISymptomAnalysisQuotaService quotaService,
+        ISymptomAnalysisJobScheduler jobScheduler,
         IMapper mapper,
         ILogger<SymptomAnalysisService> logger)
     {
@@ -61,6 +63,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         _medGemmaChatService = medGemmaChatService;
         _icdLookupService = icdLookupService;
         _quotaService = quotaService;
+        _jobScheduler = jobScheduler;
         _mapper = mapper;
         _logger = logger;
     }
@@ -298,29 +301,69 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     {
         var prepared = await PrepareClinicalQuestionSubmissionAsync(request, cancellationToken);
 
-        try
-        {
-            var analysis = await ExecuteMedGemmaAnalysisAsync(
-                prepared.Session,
-                prepared.BayesianPrompt,
-                cancellationToken);
+        prepared.Session.Status = SymptomAnalysisSessionStatus.Processing;
+        prepared.Session.CompletedAt = null;
+        prepared.Session.UpdatedAt = DateTime.UtcNow;
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-            return new ClinicalQuestionAnswersResponse
-            {
-                SessionId = prepared.Session.Id,
-                UserInput = prepared.Session.InputText,
-                Answers = _mapper.Map<List<ClinicalQuestionAnswerResult>>(prepared.Answers),
-                MedGemmaPrompt = prepared.BayesianPrompt,
-                Analysis = analysis,
-            };
-        }
-        finally
+        _jobScheduler.EnqueueAnalyze(prepared.Session.Id);
+
+        return new ClinicalQuestionAnswersResponse
         {
-            if (prepared.Session.UserSubscriptionId.HasValue)
-            {
-                await _quotaService.FinalizeAsync(prepared.Session.Id, cancellationToken);
-            }
+            SessionId = prepared.Session.Id,
+            UserInput = prepared.Session.InputText ?? string.Empty,
+            Status = prepared.Session.Status,
+            Answers = _mapper.Map<List<ClinicalQuestionAnswerResult>>(prepared.Answers),
+            MedGemmaPrompt = prepared.BayesianPrompt,
+        };
+    }
+
+    public Task ProcessAnalyzeAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default) =>
+        ProcessAnalyzeAsync(sessionId, isFinalAttempt: true, cancellationToken);
+
+    public async Task ProcessAnalyzeAsync(
+        Guid sessionId,
+        bool isFinalAttempt,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionId == Guid.Empty)
+        {
+            return;
         }
+
+        var session = await _unitOfWork.SymptomAnalysisSessions.GetByIdAsync(sessionId, cancellationToken);
+        if (session is null || session.IsDeleted || session.Status != SymptomAnalysisSessionStatus.Processing)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(session.InputText))
+        {
+            await MarkSessionFailedAsync(session, cancellationToken);
+            return;
+        }
+
+        var existingAnswers = await _unitOfWork.SessionClinicalQuestionAnswers
+            .GetTrackedBySessionIdAsync(session.Id, cancellationToken);
+
+        if (existingAnswers.Count == 0)
+        {
+            await MarkSessionFailedAsync(session, cancellationToken);
+            return;
+        }
+
+        var bayesianPrompt = await BuildMedGemmaBayesianPromptAsync(
+            session.InputText,
+            existingAnswers,
+            cancellationToken);
+
+        await ExecuteMedGemmaAnalysisAsync(
+            session,
+            bayesianPrompt,
+            isFinalAttempt,
+            cancellationToken);
     }
 
     // private method cho SubmitClinicalQuestionAnswersAsync.
@@ -528,12 +571,36 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     }
 
     //
-    private async Task<SymptomAnalysisAnalyzeResponse> ExecuteMedGemmaAnalysisAsync(
+    private async Task ExecuteMedGemmaAnalysisAsync(
         SymptomAnalysisSession session,
         string bayesianPrompt,
+        bool isFinalAttempt,
         CancellationToken cancellationToken)
     {
-        var coreResult = await RunMedGemmaAnalysisCoreAsync(session, bayesianPrompt, cancellationToken);
+        MedGemmaAnalysisCoreResult coreResult;
+        try
+        {
+            coreResult = await RunMedGemmaAnalysisCoreAsync(session, bayesianPrompt, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (BackgroundJobRetry.IsRetryable(ex))
+        {
+            if (!isFinalAttempt)
+            {
+                throw;
+            }
+
+            await MarkSessionFailedAsync(session, cancellationToken);
+            return;
+        }
+        catch (Exception)
+        {
+            await MarkSessionFailedAsync(session, cancellationToken);
+            return;
+        }
 
         var vietnameseDiagnoses = await TranslateDiagnosesToVietnameseAsync(
             coreResult.Diagnoses,
@@ -545,11 +612,10 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
         var chapterCode = ExtractIcdChapterCode(primaryDiagnosis?.Icd10Code);
 
-        var (recommendedDepartment, recommendedFacilities) =
-            await ResolveDepartmentAndFacilitiesAsync(
-                primaryDiagnosis,
-                chapterCode,
-                cancellationToken);
+        var recommendedDepartment = await ResolveDepartmentAsync(
+            primaryDiagnosis,
+            chapterCode,
+            cancellationToken);
 
         if (recommendedDepartment is not null)
         {
@@ -561,17 +627,6 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         session.CompletedAt = DateTime.UtcNow;
         session.UpdatedAt = DateTime.UtcNow;
         await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-        return new SymptomAnalysisAnalyzeResponse
-        {
-            SessionId = session.Id,
-            Status = session.Status,
-            Model = coreResult.Model,
-            Diagnoses = vietnameseDiagnoses,
-            PrimaryDiagnosis = primaryDiagnosis,
-            RecommendedDepartment = recommendedDepartment,
-            RecommendedFacilities = recommendedFacilities,
-        };
     }
 
     // private method cho ExecuteMedGemmaAnalysisAsync
@@ -582,33 +637,13 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     string bayesianPrompt,
     CancellationToken cancellationToken)
     {
-        MedGemmaChatResult aiResult;
-
-        try
-        {
-            aiResult = await _medGemmaChatService.GenerateAsync(bayesianPrompt, cancellationToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(
-                ex,
-                "MedGemma analysis failed for session {SessionId}; category {ErrorCategory}.",
-                session.Id,
-                ex.GetType().Name);
-            session.Status = SymptomAnalysisSessionStatus.Failed;
-            session.UpdatedAt = DateTime.UtcNow;
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            throw;
-        }
+        var aiResult = await _medGemmaChatService.GenerateAsync(bayesianPrompt, cancellationToken);
 
         if (!TryParseDiagnosesJson(aiResult.Content, out var parsedDiagnoses))
         {
             _logger.LogWarning(
                 "MedGemma diagnoses JSON parse failed for session {SessionId}.",
                 session.Id);
-            session.Status = SymptomAnalysisSessionStatus.Failed;
-            session.UpdatedAt = DateTime.UtcNow;
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             throw new InvalidOperationException("Không thể phân tích phản hồi JSON từ MedGemma");
         }
@@ -641,6 +676,15 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         .ToList();
 
         return new MedGemmaAnalysisCoreResult(diagnoses, aiResult.Model);
+    }
+
+    private async Task MarkSessionFailedAsync(
+        SymptomAnalysisSession session,
+        CancellationToken cancellationToken)
+    {
+        session.Status = SymptomAnalysisSessionStatus.Failed;
+        session.UpdatedAt = DateTime.UtcNow;
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 
     private static SymptomAnalysisSessionSummaryResponse MapToSessionSummary(SymptomAnalysisSession session)
@@ -687,15 +731,14 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     }
 
     //
-    private async Task<(RecommendedDepartmentResponse? Department, IReadOnlyList<MedicalFacilityResponse> Facilities)>
-        ResolveDepartmentAndFacilitiesAsync(
-            BayesianDiagnosisResponse? primaryDiagnosis,
-            string? chapterCode,
-            CancellationToken cancellationToken)
+    private async Task<RecommendedDepartmentResponse?> ResolveDepartmentAsync(
+        BayesianDiagnosisResponse? primaryDiagnosis,
+        string? chapterCode,
+        CancellationToken cancellationToken)
     {
         if (primaryDiagnosis is null || string.IsNullOrWhiteSpace(chapterCode))
         {
-            return (null, Array.Empty<MedicalFacilityResponse>());
+            return null;
         }
 
         var department = await _unitOfWork.MedicalDepartments.GetActiveByChapterCodeAsync(
@@ -703,10 +746,10 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             cancellationToken);
         if (department is null)
         {
-            return (null, Array.Empty<MedicalFacilityResponse>());
+            return null;
         }
 
-        var recommendedDepartment = new RecommendedDepartmentResponse
+        return new RecommendedDepartmentResponse
         {
             DepartmentId = department.Id,
             DepartmentName = department.DepartmentName,
@@ -716,17 +759,6 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             PriorityRank = 1,
             IsEmergencySuggested = false,
         };
-
-        var facilities = await _unitOfWork.MedicalFacilities.GetActiveWithDepartmentsAsync(
-            departmentId: department.Id,
-            search: null,
-            cancellationToken: cancellationToken);
-
-        var facilityResponses = facilities
-            .Select(facility => _mapper.Map<MedicalFacilityResponse>(facility))
-            .ToList();
-
-        return (recommendedDepartment, facilityResponses);
     }
 
     //
@@ -1062,7 +1094,6 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             cancellationToken: cancellationToken);
 
         var departmentRecommendations = recommendationsPaged.Items;
-        var recommendedFacilities = new List<MedicalFacilityResponse>();
 
         if (departmentRecommendations.Count > 0)
         {
@@ -1076,19 +1107,6 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
                     recommendation.Department = department;
                 }
             }
-
-            var primaryRecommendation = departmentRecommendations.OrderBy(d => d.PriorityRank).FirstOrDefault();
-            if (primaryRecommendation is not null)
-            {
-                var facilities = await _unitOfWork.MedicalFacilities.GetActiveWithDepartmentsAsync(
-                    departmentId: primaryRecommendation.DepartmentId,
-                    search: null,
-                    cancellationToken: cancellationToken);
-
-                recommendedFacilities = facilities
-                    .Select(facility => _mapper.Map<MedicalFacilityResponse>(facility))
-                    .ToList();
-            }
         }
 
         var response = _mapper.Map<SymptomAnalysisResponse>(session);
@@ -1096,7 +1114,6 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         response.Answers = _mapper.Map<List<ClinicalQuestionAnswerResult>>(sessionAnswers);
         response.RecommendedDepartments =
             _mapper.Map<List<RecommendedDepartmentResponse>>(departmentRecommendations);
-        response.RecommendedFacilities = recommendedFacilities;
 
         return response;
     }

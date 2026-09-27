@@ -24,6 +24,8 @@ public sealed class LabTestSession : BaseEntity
 
     public string? AiSummary { get; set; }
 
+    public LabTestSummaryStatus? AiSummaryStatus { get; set; }
+
     public DateTime? ProcessedAt { get; set; }
 
     public UserSubscription? UserSubscription { get; set; }

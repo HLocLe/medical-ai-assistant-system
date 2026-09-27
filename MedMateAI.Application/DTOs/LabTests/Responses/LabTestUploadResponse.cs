@@ -20,5 +20,7 @@ public sealed class LabTestUploadResponse
 
     public string? AiSummary { get; set; }
 
+    public LabTestSummaryStatus? AiSummaryStatus { get; set; }
+
     public IList<LabTestResultItemResponse> Results { get; set; } = new List<LabTestResultItemResponse>();
 }

@@ -1,3 +1,4 @@
+using MedMateAI.Application.Common;
 using MedMateAI.Application.DTOs.Common;
 using MedMateAI.Application.DTOs.WebChatbot.Requests;
 using MedMateAI.Application.DTOs.WebChatbot.Responses;
@@ -70,6 +71,20 @@ public sealed class WebChatbotController : ControllerBase
                 Success = false,
                 Message = "Send message failed.",
                 Errors = new List<string> { ex.Message },
+            });
+        }
+        catch (TransientRemoteCallException ex)
+        {
+            _logger.LogWarning(ex, "Web chatbot AI provider is temporarily unavailable.");
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ApiResponse<WebChatbotResponse>
+            {
+                Success = false,
+                Message = "Web chatbot is temporarily unavailable.",
+                Errors = new List<string>
+                {
+                    "The AI chatbot service is busy. Please try again later.",
+                },
             });
         }
         catch (InvalidOperationException ex)

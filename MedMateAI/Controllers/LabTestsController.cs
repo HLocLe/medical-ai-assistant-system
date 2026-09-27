@@ -181,23 +181,24 @@ public sealed class LabTestsController : ControllerBase
     }
 
     [HttpPost("{sessionId:guid}/summary")]
-    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status404NotFound)]
-    [ProducesResponseType(typeof(ApiResponse<string>), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ApiResponse<LabTestSummaryResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<LabTestSummaryResponse>), StatusCodes.Status202Accepted)]
+    [ProducesResponseType(typeof(ApiResponse<LabTestSummaryResponse>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<LabTestSummaryResponse>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<LabTestSummaryResponse>), StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> SummarizeSession(Guid sessionId, CancellationToken cancellationToken = default)
     {
         var currentUser = await _userService.GetCurrentUserAsync(cancellationToken);
         if (currentUser is null)
         {
-            return Unauthorized(ApiResponseFactory.FailFromErrors<string>(
+            return Unauthorized(ApiResponseFactory.FailFromErrors<LabTestSummaryResponse>(
                 new[] { UnauthenticatedError },
                 "Chưa đăng nhập"));
         }
 
         if (sessionId == Guid.Empty)
         {
-            return BadRequest(ApiResponseFactory.Fail<string>(InvalidSessionIdMessage));
+            return BadRequest(ApiResponseFactory.Fail<LabTestSummaryResponse>(InvalidSessionIdMessage));
         }
 
         var (ok, errors, data) = await _labTestService.SummarizeSessionAsync(
@@ -210,14 +211,19 @@ public sealed class LabTestsController : ControllerBase
             var errorList = errors?.ToList() ?? new List<string>();
             if (errorList.Contains(NotFoundMessage))
             {
-                return NotFound(ApiResponseFactory.FailFromErrors<string>(errorList, NotFoundMessage));
+                return NotFound(ApiResponseFactory.FailFromErrors<LabTestSummaryResponse>(errorList, NotFoundMessage));
             }
 
-            return BadRequest(ApiResponseFactory.FailFromErrors<string>(
+            return BadRequest(ApiResponseFactory.FailFromErrors<LabTestSummaryResponse>(
                 errorList,
                 "Tóm tắt kết quả xét nghiệm thất bại"));
         }
 
-        return Ok(ApiResponseFactory.Success(data, "Tóm tắt kết quả xét nghiệm thành công"));
+        if (data.Status == LabTestSummaryStatus.Completed)
+        {
+            return Ok(ApiResponseFactory.Success(data, "Tóm tắt kết quả xét nghiệm thành công"));
+        }
+
+        return Accepted(ApiResponseFactory.Success(data, "Đã xếp hàng tóm tắt kết quả xét nghiệm"));
     }
 }
