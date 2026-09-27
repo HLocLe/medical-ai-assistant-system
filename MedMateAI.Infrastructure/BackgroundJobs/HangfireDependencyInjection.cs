@@ -29,16 +29,21 @@ public static class HangfireDependencyInjection
 
         services.AddHangfireServer(options =>
         {
-            options.WorkerCount = 10;
+            options.WorkerCount = 20;
+            options.SchedulePollingInterval = TimeSpan.FromSeconds(5);
         });
 
         services.AddScoped<ILabTestOcrProcessor, LabTestOcrProcessor>();
         services.AddScoped<LabTestOcrJob>();
+        services.AddScoped<LabTestSummaryJob>();
         services.AddSingleton<ILabTestJobScheduler, HangfireLabTestJobScheduler>();
 
         services.AddScoped<ConsultationDoctorQuestionsJob>();
         services.AddScoped<ConsultationReminderSmsJob>();
         services.AddSingleton<IConsultationSessionJobScheduler, HangfireConsultationSessionJobScheduler>();
+
+        services.AddScoped<SymptomAnalysisMedGemmaJob>();
+        services.AddSingleton<ISymptomAnalysisJobScheduler, HangfireSymptomAnalysisJobScheduler>();
 
         services.AddScoped<PayOSPendingPaymentReconciliationJob>();
 

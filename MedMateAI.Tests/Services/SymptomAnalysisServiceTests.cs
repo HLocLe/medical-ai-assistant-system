@@ -37,6 +37,7 @@ public class SymptomAnalysisServiceTests
     private Mock<IMedGemmaChatService> _medGemmaMock = null!;
     private Mock<IIcdLookupService> _icdLookupMock = null!;
     private Mock<ISymptomAnalysisQuotaService> _quotaServiceMock = null!;
+    private Mock<ISymptomAnalysisJobScheduler> _jobSchedulerMock = null!;
     private Mock<IQuotaUsageRepository> _quotaUsagesMock = null!;
     private Mock<IMapper> _mapperMock = null!;
     private Mock<ILogger<SymptomAnalysisService>> _loggerMock = null!;
@@ -63,6 +64,7 @@ public class SymptomAnalysisServiceTests
         _medGemmaMock = new Mock<IMedGemmaChatService>();
         _icdLookupMock = new Mock<IIcdLookupService>();
         _quotaServiceMock = new Mock<ISymptomAnalysisQuotaService>();
+        _jobSchedulerMock = new Mock<ISymptomAnalysisJobScheduler>();
         _quotaUsagesMock = new Mock<IQuotaUsageRepository>();
         _mapperMock = new Mock<IMapper>();
         _loggerMock = new Mock<ILogger<SymptomAnalysisService>>();
@@ -105,6 +107,7 @@ public class SymptomAnalysisServiceTests
             _medGemmaMock.Object,
             _icdLookupMock.Object,
             _quotaServiceMock.Object,
+            _jobSchedulerMock.Object,
             _mapperMock.Object,
             _loggerMock.Object);
     }
@@ -339,5 +342,90 @@ public class SymptomAnalysisServiceTests
         Assert.That(result.IsFreeTier, Is.True);
         Assert.That(result.UsedToday, Is.EqualTo(2));
         Assert.That(result.RemainingToday, Is.EqualTo(3));
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task SubmitClinicalQuestionAnswersAsync_PersistsAnswersAndEnqueuesAnalyzeJob()
+    {
+        var questionId = Guid.NewGuid();
+        var session = new SymptomAnalysisSession
+        {
+            Id = _sessionId,
+            UserId = _userId,
+            InputText = "ho khan",
+            Status = SymptomAnalysisSessionStatus.Processing,
+            UserSubscriptionId = Guid.NewGuid(),
+        };
+        var answer = new SessionClinicalQuestionAnswer
+        {
+            Id = Guid.NewGuid(),
+            SymptomAnalysisSessionId = _sessionId,
+            ClinicalQuestionId = questionId,
+            AnswerValues = new Dictionary<string, bool> { ["yes"] = false },
+            ClinicalQuestion = new ClinicalQuestion
+            {
+                Id = questionId,
+                QuestionVi = "Có sốt?",
+                Answers = new Dictionary<string, string> { ["yes"] = "fever", ["no"] = "no fever" },
+            },
+        };
+
+        _sessionsMock.Setup(r => r.GetByIdAsync(_sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _sessionAnswersMock.Setup(r => r.GetTrackedBySessionIdAsync(_sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<SessionClinicalQuestionAnswer> { answer });
+        _translationServiceMock.Setup(t => t.TranslateToEnglishAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("dry cough");
+        _mapperMock.Setup(m => m.Map<List<ClinicalQuestionAnswerResult>>(It.IsAny<object>()))
+            .Returns(new List<ClinicalQuestionAnswerResult>());
+
+        var result = await _service.SubmitClinicalQuestionAnswersAsync(
+            new SubmitClinicalQuestionAnswersRequest
+            {
+                SessionId = _sessionId,
+                Answers =
+                [
+                    new ClinicalQuestionAnswerItem
+                    {
+                        QuestionId = questionId,
+                        Answers = new Dictionary<string, bool> { ["yes"] = true },
+                    },
+                ],
+            },
+            CancellationToken.None);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.SessionId, Is.EqualTo(_sessionId));
+            Assert.That(result.Status, Is.EqualTo(SymptomAnalysisSessionStatus.Processing));
+            Assert.That(answer.AnswerValues["yes"], Is.True);
+        });
+        _jobSchedulerMock.Verify(s => s.EnqueueAnalyze(_sessionId), Times.Once);
+        _quotaServiceMock.Verify(
+            q => q.FinalizeAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _medGemmaMock.Verify(
+            m => m.GenerateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Test]
+    [Category("A")]
+    public async Task ProcessAnalyzeAsync_SessionNotProcessing_DoesNothing()
+    {
+        _sessionsMock.Setup(r => r.GetByIdAsync(_sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SymptomAnalysisSession
+            {
+                Id = _sessionId,
+                Status = SymptomAnalysisSessionStatus.Completed,
+                InputText = "ho",
+            });
+
+        await _service.ProcessAnalyzeAsync(_sessionId, isFinalAttempt: false, CancellationToken.None);
+
+        _medGemmaMock.Verify(
+            m => m.GenerateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 }

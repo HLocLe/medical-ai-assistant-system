@@ -96,9 +96,10 @@ public class LabTestResultAnalyzerTests
     public async Task AnalyzeAndPersistAsync_OcrReturnsEmptyRows_DoesNotSave()
     {
         var sessionId = Guid.NewGuid();
+        var session = new LabTestSession { Id = sessionId, RawOcrText = "some text" };
         _labTestSessionRepo
             .Setup(r => r.GetByIdAsync(sessionId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new LabTestSession { Id = sessionId, RawOcrText = "some text" });
+            .ReturnsAsync(session);
 
         _resultDetailRepo
             .Setup(r => r.FirstOrDefaultAsync(
@@ -114,15 +115,17 @@ public class LabTestResultAnalyzerTests
         await _analyzer.AnalyzeAndPersistAsync(sessionId);
 
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+        Assert.That(session.AiSummaryStatus, Is.Null);
     }
 
     [Test]
     public async Task AnalyzeAndPersistAsync_UnmatchedRow_SavesUnknownStatus()
     {
         var sessionId = Guid.NewGuid();
+        var session = new LabTestSession { Id = sessionId, RawOcrText = "UNKN: 5" };
         _labTestSessionRepo
             .Setup(r => r.GetByIdAsync(sessionId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new LabTestSession { Id = sessionId, RawOcrText = "UNKN: 5" });
+            .ReturnsAsync(session);
 
         _resultDetailRepo
             .Setup(r => r.FirstOrDefaultAsync(
@@ -156,6 +159,8 @@ public class LabTestResultAnalyzerTests
         Assert.That(captured, Is.Not.Null);
         Assert.That(captured!.Status, Is.EqualTo(LabResultStatus.Unknown));
         Assert.That(captured.IsMatched, Is.False);
+        Assert.That(session.Status, Is.EqualTo(LabTestSessionStatus.Completed));
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Processing));
     }
 
     [Test]

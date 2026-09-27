@@ -53,7 +53,6 @@ public sealed class SymptomAnalysisController : ControllerBase
     [HttpPost("submit-clinical-question-answers")]
     [ProducesResponseType(typeof(ApiResponse<ClinicalQuestionAnswersResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ApiResponse<ClinicalQuestionAnswersResponse>), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ApiResponse<ClinicalQuestionAnswersResponse>), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> SubmitClinicalQuestionAnswers(
         [FromBody] SubmitClinicalQuestionAnswersRequest request,
         CancellationToken cancellationToken = default)
@@ -71,11 +70,9 @@ public sealed class SymptomAnalysisController : ControllerBase
         }
         catch (InvalidOperationException ex)
         {
-            return StatusCode(
-                StatusCodes.Status502BadGateway,
-                ApiResponseFactory.FailFromErrors<ClinicalQuestionAnswersResponse>(
-                    new[] { ex.Message },
-                    "Phân tích MedGemma thất bại"));
+            return BadRequest(ApiResponseFactory.FailFromErrors<ClinicalQuestionAnswersResponse>(
+                new[] { ex.Message },
+                "Gửi câu trả lời lâm sàng thất bại"));
         }
     }
 

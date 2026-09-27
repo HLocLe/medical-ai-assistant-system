@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using MedMateAI.Application.Common;
 using MedMateAI.Application.DTOs.AIConfigs.Responses;
 using MedMateAI.Application.DTOs.Common;
 using MedMateAI.Application.DTOs.LabTests.Requests;
@@ -13,6 +14,7 @@ using MedMateAI.Domain.Entities;
 using MedMateAI.Domain.Enums;
 using MedMateAI.Domain.Persistence;
 using MedMateAI.Domain.Repository;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using NUnit.Framework;
 
@@ -59,7 +61,8 @@ public class LabTestServiceTests
             _analyzerMock.Object,
             _quotaServiceMock.Object,
             _aiConfigServiceMock.Object,
-            _aiChatProviderMock.Object);
+            _aiChatProviderMock.Object,
+            NullLogger<LabTestService>.Instance);
     }
 
     // â”€â”€ AnalyzeFromDocumentUrlAsync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -422,5 +425,162 @@ public class LabTestServiceTests
         Assert.That(result, Has.Count.EqualTo(1));
         Assert.That(result[0].ExtractedTestName, Is.EqualTo("HGB"));
         Assert.That(result[0].ExtractedValue, Is.EqualTo("14.5"));
+    }
+
+    // SummarizeSessionAsync / ProcessSummaryAsync
+
+    [Test]
+    [Category("N")]
+    public async Task SummarizeSessionAsync_NoSummary_MarksProcessingAndEnqueues()
+    {
+        var session = CreateCompletedSessionWithResults();
+        SetupSessionLookups(session);
+
+        var result = await _service.SummarizeSessionAsync(_userId, session.Id);
+
+        Assert.That(result.Succeeded, Is.True);
+        Assert.That(result.Data!.Status, Is.EqualTo(LabTestSummaryStatus.Processing));
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Processing));
+        _schedulerMock.Verify(s => s.EnqueueSummary(session.Id), Times.Once);
+        _aiChatProviderMock.Verify(p => p.GenerateAsync(It.IsAny<AIProviderChatRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task SummarizeSessionAsync_ExistingSummary_ReturnsCompletedWithoutEnqueue()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummary = "Tóm tắt";
+        session.AiSummaryStatus = LabTestSummaryStatus.Completed;
+        SetupSessionLookups(session);
+
+        var result = await _service.SummarizeSessionAsync(_userId, session.Id);
+
+        Assert.That(result.Data!.Status, Is.EqualTo(LabTestSummaryStatus.Completed));
+        Assert.That(result.Data.AiSummary, Is.EqualTo("Tóm tắt"));
+        _schedulerMock.Verify(s => s.EnqueueSummary(It.IsAny<Guid>()), Times.Never);
+    }
+
+    [Test]
+    [Category("A")]
+    public async Task SummarizeSessionAsync_AlreadyProcessing_DoesNotEnqueueAgain()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummaryStatus = LabTestSummaryStatus.Processing;
+        SetupSessionLookups(session);
+
+        var result = await _service.SummarizeSessionAsync(_userId, session.Id);
+
+        Assert.That(result.Data!.Status, Is.EqualTo(LabTestSummaryStatus.Processing));
+        _schedulerMock.Verify(s => s.EnqueueSummary(It.IsAny<Guid>()), Times.Never);
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task ProcessSummaryAsync_Success_SavesSummaryAndCompletes()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummaryStatus = LabTestSummaryStatus.Processing;
+        SetupSessionLookups(session);
+        SetupSummaryAiConfig();
+        _aiChatProviderMock.Setup(p => p.GenerateAsync(It.IsAny<AIProviderChatRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AIProviderChatResult { Content = "  Kết quả tóm tắt  " });
+
+        await _service.ProcessSummaryAsync(session.Id, isFinalAttempt: false);
+
+        Assert.That(session.AiSummary, Is.EqualTo("Kết quả tóm tắt"));
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Completed));
+    }
+
+    [Test]
+    [Category("A")]
+    public void ProcessSummaryAsync_TransientFailureNotFinal_RethrowsForRetry()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummaryStatus = LabTestSummaryStatus.Processing;
+        SetupSessionLookups(session);
+        SetupSummaryAiConfig();
+        _aiChatProviderMock.Setup(p => p.GenerateAsync(It.IsAny<AIProviderChatRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new TransientRemoteCallException("503", 503));
+
+        Assert.ThrowsAsync<TransientRemoteCallException>(
+            () => _service.ProcessSummaryAsync(session.Id, isFinalAttempt: false));
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Processing));
+    }
+
+    [Test]
+    [Category("A")]
+    public async Task ProcessSummaryAsync_TransientFailureFinalAttempt_MarksFailed()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummaryStatus = LabTestSummaryStatus.Processing;
+        SetupSessionLookups(session);
+        SetupSummaryAiConfig();
+        _aiChatProviderMock.Setup(p => p.GenerateAsync(It.IsAny<AIProviderChatRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new TransientRemoteCallException("503", 503));
+
+        await _service.ProcessSummaryAsync(session.Id, isFinalAttempt: true);
+
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Failed));
+        Assert.That(session.AiSummary, Is.Null);
+    }
+
+    [Test]
+    [Category("A")]
+    public async Task ProcessSummaryAsync_NonTransientFailure_MarksFailedWithoutRethrow()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummaryStatus = LabTestSummaryStatus.Processing;
+        SetupSessionLookups(session);
+        SetupSummaryAiConfig();
+        _aiChatProviderMock.Setup(p => p.GenerateAsync(It.IsAny<AIProviderChatRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("bad response"));
+
+        await _service.ProcessSummaryAsync(session.Id, isFinalAttempt: false);
+
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Failed));
+    }
+
+    [Test]
+    [Category("B")]
+    public async Task ProcessSummaryAsync_NotProcessing_Skips()
+    {
+        var session = CreateCompletedSessionWithResults();
+        session.AiSummaryStatus = LabTestSummaryStatus.Failed;
+        SetupSessionLookups(session);
+
+        await _service.ProcessSummaryAsync(session.Id, isFinalAttempt: false);
+
+        Assert.That(session.AiSummaryStatus, Is.EqualTo(LabTestSummaryStatus.Failed));
+        _aiChatProviderMock.Verify(p => p.GenerateAsync(It.IsAny<AIProviderChatRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    private LabTestSession CreateCompletedSessionWithResults()
+    {
+        var sessionId = Guid.NewGuid();
+        return new LabTestSession
+        {
+            Id = sessionId,
+            UserId = _userId,
+            Status = LabTestSessionStatus.Completed,
+            LabTestResultDetails = new List<LabTestResultDetail>
+            {
+                new() { Id = Guid.NewGuid(), TestSessionId = sessionId, RawExtractedName = "HGB", RawExtractedValue = "14.5" },
+            },
+        };
+    }
+
+    private void SetupSessionLookups(LabTestSession session)
+    {
+        _sessionDetailsMock.Setup(r => r.GetByIdWithResultsAsync(session.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _sessionsMock.Setup(r => r.GetByIdAsync(session.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+    }
+
+    private void SetupSummaryAiConfig()
+    {
+        _aiConfigServiceMock.Setup(s => s.GetActiveAIConfigByTaskTypeAsync("LabTestSummary", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AIConfigResponse { TaskType = "LabTestSummary", SystemPrompt = "prompt" });
     }
 }

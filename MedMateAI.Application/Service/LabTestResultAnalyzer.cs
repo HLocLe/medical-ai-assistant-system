@@ -168,6 +168,7 @@ public sealed class LabTestResultAnalyzer : ILabTestResultAnalyzer
     private void MarkSessionCompleted(LabTestSession session)
     {
         session.Status = LabTestSessionStatus.Completed;
+        session.AiSummaryStatus ??= LabTestSummaryStatus.Processing;
         session.ProcessedAt = DateTime.UtcNow;
         session.UpdatedAt = DateTime.UtcNow;
         _unitOfWork.LabTestSessions.Update(session);
