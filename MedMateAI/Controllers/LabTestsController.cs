@@ -163,7 +163,12 @@ public sealed class LabTestsController : ControllerBase
             return BadRequest(ApiResponseFactory.Fail<LabTestUploadResponse>(InvalidSessionIdMessage));
         }
 
-        var data = await _labTestService.GetSessionAsync(currentUser.Id, sessionId, cancellationToken);
+        var isAdmin = currentUser.Roles.Contains("Admin", StringComparer.OrdinalIgnoreCase);
+        var data = await _labTestService.GetSessionAsync(
+            currentUser.Id,
+            sessionId,
+            isAdmin,
+            cancellationToken);
         if (data is null)
         {
             return NotFound(ApiResponseFactory.Fail<LabTestUploadResponse>(NotFoundMessage));

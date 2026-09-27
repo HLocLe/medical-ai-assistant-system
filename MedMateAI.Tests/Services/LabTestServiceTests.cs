@@ -32,6 +32,7 @@ public class LabTestServiceTests
     private Mock<ILabTestQuotaService> _quotaServiceMock = null!;
     private Mock<IAIConfigService> _aiConfigServiceMock = null!;
     private Mock<IAIChatProvider> _aiChatProviderMock = null!;
+    private Mock<IRecoveryPlanRequestRepository> _recoveryPlanRequestsMock = null!;
     private LabTestService _service = null!;
     private readonly Guid _userId = Guid.NewGuid();
 
@@ -47,7 +48,9 @@ public class LabTestServiceTests
         _quotaServiceMock = new Mock<ILabTestQuotaService>();
         _aiConfigServiceMock = new Mock<IAIConfigService>();
         _aiChatProviderMock = new Mock<IAIChatProvider>();
+        _recoveryPlanRequestsMock = new Mock<IRecoveryPlanRequestRepository>();
 
+        _unitOfWorkMock.Setup(u => u.RecoveryPlanRequests).Returns(_recoveryPlanRequestsMock.Object);
         _unitOfWorkMock.Setup(u => u.LabTestSessions).Returns(_sessionsMock.Object);
         _unitOfWorkMock.Setup(u => u.LabTestSessionDetails).Returns(_sessionDetailsMock.Object);
         _unitOfWorkMock.Setup(u => u.LabTestOcrExtracts).Returns(_ocrExtractsMock.Object);
@@ -207,6 +210,99 @@ public class LabTestServiceTests
 
         // Assert
         Assert.That(result, Is.Null);
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task GetSessionAsync_Admin_ReturnsSessionOfOtherUser()
+    {
+        // Arrange
+        var sessionId = Guid.NewGuid();
+        var session = new LabTestSession { Id = sessionId, UserId = Guid.NewGuid(), AiSummary = "Tóm tắt" };
+        _sessionDetailsMock.Setup(r => r.GetByIdWithResultsAsync(sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+
+        // Act
+        var result = await _service.GetSessionAsync(_userId, sessionId, isAdmin: true);
+
+        // Assert
+        Assert.That(result, Is.Not.Null);
+        Assert.That(result!.AiSummary, Is.EqualTo("Tóm tắt"));
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task GetSessionAsync_AssignedDoctor_ReturnsSession()
+    {
+        // Arrange
+        var sessionId = Guid.NewGuid();
+        var doctor = new Doctor { Id = Guid.NewGuid(), UserId = _userId, IsActive = true };
+        var session = new LabTestSession { Id = sessionId, UserId = Guid.NewGuid(), AiSummary = "Tóm tắt" };
+        _sessionDetailsMock.Setup(r => r.GetByIdWithResultsAsync(sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _recoveryPlanRequestsMock.Setup(r => r.GetDoctorByUserIdAsync(_userId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(doctor);
+        _recoveryPlanRequestsMock.Setup(r => r.IsLabSessionAssignedToDoctorAsync(
+                sessionId,
+                doctor.Id,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        // Act
+        var result = await _service.GetSessionAsync(_userId, sessionId);
+
+        // Assert
+        Assert.That(result, Is.Not.Null);
+        Assert.That(result!.AiSummary, Is.EqualTo("Tóm tắt"));
+    }
+
+    [Test]
+    [Category("A")]
+    public async Task GetSessionAsync_DoctorNotAssigned_ReturnsNull()
+    {
+        // Arrange
+        var sessionId = Guid.NewGuid();
+        var doctor = new Doctor { Id = Guid.NewGuid(), UserId = _userId, IsActive = true };
+        var session = new LabTestSession { Id = sessionId, UserId = Guid.NewGuid() };
+        _sessionDetailsMock.Setup(r => r.GetByIdWithResultsAsync(sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _recoveryPlanRequestsMock.Setup(r => r.GetDoctorByUserIdAsync(_userId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(doctor);
+        _recoveryPlanRequestsMock.Setup(r => r.IsLabSessionAssignedToDoctorAsync(
+                sessionId,
+                doctor.Id,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        // Act
+        var result = await _service.GetSessionAsync(_userId, sessionId);
+
+        // Assert
+        Assert.That(result, Is.Null);
+    }
+
+    [Test]
+    [Category("A")]
+    public async Task GetSessionAsync_InactiveDoctor_ReturnsNull()
+    {
+        // Arrange
+        var sessionId = Guid.NewGuid();
+        var doctor = new Doctor { Id = Guid.NewGuid(), UserId = _userId, IsActive = false };
+        var session = new LabTestSession { Id = sessionId, UserId = Guid.NewGuid() };
+        _sessionDetailsMock.Setup(r => r.GetByIdWithResultsAsync(sessionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(session);
+        _recoveryPlanRequestsMock.Setup(r => r.GetDoctorByUserIdAsync(_userId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(doctor);
+
+        // Act
+        var result = await _service.GetSessionAsync(_userId, sessionId);
+
+        // Assert
+        Assert.That(result, Is.Null);
+        _recoveryPlanRequestsMock.Verify(r => r.IsLabSessionAssignedToDoctorAsync(
+            It.IsAny<Guid>(),
+            It.IsAny<Guid>(),
+            It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Test]

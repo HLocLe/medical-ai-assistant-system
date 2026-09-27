@@ -135,6 +135,7 @@ public sealed class LabTestService : ILabTestService
     public async Task<LabTestUploadResponse?> GetSessionAsync(
         Guid userId,
         Guid sessionId,
+        bool isAdmin = false,
         CancellationToken cancellationToken = default)
     {
         if (userId == Guid.Empty || sessionId == Guid.Empty)
@@ -143,7 +144,7 @@ public sealed class LabTestService : ILabTestService
         }
 
         var session = await _unitOfWork.LabTestSessionDetails.GetByIdWithResultsAsync(sessionId, cancellationToken);
-        if (session is null || session.UserId != userId)
+        if (session is null || !await CanViewSessionAsync(session, userId, isAdmin, cancellationToken))
         {
             return null;
         }
@@ -154,13 +155,36 @@ public sealed class LabTestService : ILabTestService
         {
             await _resultAnalyzer.AnalyzeAndPersistAsync(sessionId, cancellationToken);
             session = await _unitOfWork.LabTestSessionDetails.GetByIdWithResultsAsync(sessionId, cancellationToken);
-            if (session is null || session.UserId != userId)
+            if (session is null)
             {
                 return null;
             }
         }
 
         return MapToResponse(session);
+    }
+
+    private async Task<bool> CanViewSessionAsync(
+        LabTestSession session,
+        Guid userId,
+        bool isAdmin,
+        CancellationToken cancellationToken)
+    {
+        if (session.UserId == userId || isAdmin)
+        {
+            return true;
+        }
+
+        var doctor = await _unitOfWork.RecoveryPlanRequests.GetDoctorByUserIdAsync(userId, cancellationToken);
+        if (doctor is null || !doctor.IsActive)
+        {
+            return false;
+        }
+
+        return await _unitOfWork.RecoveryPlanRequests.IsLabSessionAssignedToDoctorAsync(
+            session.Id,
+            doctor.Id,
+            cancellationToken);
     }
 
     public async Task<PagedResponse<LabTestSessionSummaryResponse>> GetSessionsByUserIdAsync(
