@@ -1,6 +1,7 @@
 using Hangfire;
 using Hangfire.PostgreSql;
 using MedMateAI.Application.IService;
+using MedMateAI.Application.Options;
 using MedMateAI.Application.Service;
 using MedMateAI.Infrastructure.Payments.PayOS;
 using Microsoft.AspNetCore.Builder;
@@ -43,6 +44,8 @@ public static class HangfireDependencyInjection
         services.AddSingleton<IConsultationSessionJobScheduler, HangfireConsultationSessionJobScheduler>();
 
         services.AddScoped<SymptomAnalysisMedGemmaJob>();
+        services.AddScoped<SymptomAnalysisQuotaFinalizeJob>();
+        services.AddScoped<SymptomAnalysisAbandonedSessionJob>();
         services.AddSingleton<ISymptomAnalysisJobScheduler, HangfireSymptomAnalysisJobScheduler>();
 
         services.AddScoped<PayOSPendingPaymentReconciliationJob>();
@@ -64,6 +67,30 @@ public static class HangfireDependencyInjection
 
         recurringJobManager.AddOrUpdate<PayOSPendingPaymentReconciliationJob>(
             "payos-pending-payment-maintenance",
+            job => job.ExecuteAsync(CancellationToken.None),
+            cronExpression,
+            new RecurringJobOptions
+            {
+                TimeZone = TimeZoneInfo.Utc,
+            });
+
+        return app;
+    }
+
+    public static IApplicationBuilder UseSymptomAnalysisMaintenance(
+        this IApplicationBuilder app)
+    {
+        var options = app.ApplicationServices
+            .GetRequiredService<IOptions<SymptomAnalysisOptions>>()
+            .Value;
+        var recurringJobManager = app.ApplicationServices
+            .GetRequiredService<IRecurringJobManager>();
+        var cronExpression = options.AbandonedSessionCleanupIntervalMinutes == 60
+            ? Cron.Hourly()
+            : $"*/{options.AbandonedSessionCleanupIntervalMinutes} * * * *";
+
+        recurringJobManager.AddOrUpdate<SymptomAnalysisAbandonedSessionJob>(
+            "symptom-analysis-abandoned-session-cleanup",
             job => job.ExecuteAsync(CancellationToken.None),
             cronExpression,
             new RecurringJobOptions

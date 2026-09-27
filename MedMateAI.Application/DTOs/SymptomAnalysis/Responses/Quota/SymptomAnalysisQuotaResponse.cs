@@ -8,6 +8,8 @@ public sealed class SymptomAnalysisQuotaResponse
 
     public int UsedToday { get; set; }
 
+    public int ReservedToday { get; set; }
+
     public int RemainingToday { get; set; }
 
     public bool IsFreeTier { get; set; }

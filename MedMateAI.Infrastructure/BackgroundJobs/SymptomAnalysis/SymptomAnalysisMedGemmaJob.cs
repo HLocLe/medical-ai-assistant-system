@@ -35,8 +35,7 @@ public sealed class SymptomAnalysisMedGemmaJob
         }
         finally
         {
-            // Finalize is a no-op while status is Processing (between Hangfire retries)
-            // and a no-op for free sessions without UserSubscriptionId.
+          
             await _quotaService.FinalizeAsync(sessionId);
         }
     }

@@ -99,6 +99,8 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityR
     public DbSet<SubscriptionPlanQuota> SubscriptionPlanQuotas => Set<SubscriptionPlanQuota>();
     public DbSet<UserSubscriptionUsage> UserSubscriptionUsages => Set<UserSubscriptionUsage>();
     public DbSet<UserSubscriptionLog> UserSubscriptionLogs => Set<UserSubscriptionLog>();
+    public DbSet<FreeQuotaUsage> FreeQuotaUsages => Set<FreeQuotaUsage>();
+    public DbSet<FreeQuotaUsageLog> FreeQuotaUsageLogs => Set<FreeQuotaUsageLog>();
     public DbSet<RecoveryPlanRequest> RecoveryPlanRequests => Set<RecoveryPlanRequest>();
     public DbSet<RecoveryPlanRequestEvent> RecoveryPlanRequestEvents => Set<RecoveryPlanRequestEvent>();
     public DbSet<RecoveryPlanPhase> RecoveryPlanPhases => Set<RecoveryPlanPhase>();

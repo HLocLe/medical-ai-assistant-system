@@ -31,6 +31,7 @@ public sealed class SymptomAnalysisController : ControllerBase
     }
 
     [HttpPost("suggest-clinical-questions")]
+    [Authorize]
     [ProducesResponseType(typeof(ApiResponse<SuggestClinicalQuestionsResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ApiResponse<SuggestClinicalQuestionsResponse>), StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> SuggestClinicalQuestions(
@@ -51,6 +52,7 @@ public sealed class SymptomAnalysisController : ControllerBase
     }
 
     [HttpPost("submit-clinical-question-answers")]
+    [Authorize]
     [ProducesResponseType(typeof(ApiResponse<ClinicalQuestionAnswersResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ApiResponse<ClinicalQuestionAnswersResponse>), StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> SubmitClinicalQuestionAnswers(

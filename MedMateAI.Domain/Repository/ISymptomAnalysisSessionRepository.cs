@@ -20,4 +20,20 @@ public interface ISymptomAnalysisSessionRepository : IGenericRepository<SymptomA
         int pageNumber,
         int pageSize,
         CancellationToken cancellationToken = default);
+
+    Task<bool> TryMarkSubmittedAsync(
+        Guid sessionId,
+        DateTime utcNow,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<Guid>> GetAbandonedSessionIdsAsync(
+        DateTime createdBefore,
+        int batchSize,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryMarkAbandonedAsFailedAsync(
+        Guid sessionId,
+        DateTime createdBefore,
+        DateTime utcNow,
+        CancellationToken cancellationToken = default);
 }

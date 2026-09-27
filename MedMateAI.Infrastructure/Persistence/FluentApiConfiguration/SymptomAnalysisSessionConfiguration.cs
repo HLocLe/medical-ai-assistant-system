@@ -29,6 +29,17 @@ public sealed class SymptomAnalysisSessionConfiguration : IEntityTypeConfigurati
             .IsRequired()
             .HasDefaultValue(SymptomAnalysisSessionType.None);
 
+        builder.Property(x => x.QuotaSource)
+            .HasConversion<string>()
+            .HasMaxLength(32)
+            .IsRequired()
+            .HasDefaultValue(QuotaSource.None);
+
+        builder.HasOne(x => x.FreeQuotaUsage)
+            .WithMany()
+            .HasForeignKey(x => x.FreeQuotaUsageId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.HasOne<ApplicationUser>()
             .WithMany(x => x.SymptomAnalysisSessions)
             .HasForeignKey(x => x.UserId)
@@ -49,6 +60,8 @@ public sealed class SymptomAnalysisSessionConfiguration : IEntityTypeConfigurati
         builder.HasIndex(x => new { x.UserId, x.SessionType });
         builder.HasIndex(x => x.UserSubscriptionId);
         builder.HasIndex(x => x.UserSubscriptionUsageId);
+        builder.HasIndex(x => x.FreeQuotaUsageId);
+        builder.HasIndex(x => new { x.Status, x.SubmittedAt, x.CreatedAt });
 
         builder.HasMany(x => x.SessionSymptoms)
             .WithOne(x => x.SymptomAnalysisSession)
