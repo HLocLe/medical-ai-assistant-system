@@ -302,7 +302,7 @@ public sealed partial class ConsultationSessionService : IConsultationSessionSer
             session.UserSubscriptionUsageId = reserveResult.Data.Id;
 
             _consultationSessions.Add(session);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
             await _unitOfWork.CommitTransactionAsync(cancellationToken);
         }
         catch
@@ -948,15 +948,15 @@ public sealed partial class ConsultationSessionService : IConsultationSessionSer
 
         foreach (var question in departmentQuestions)
 
-        {
+            {
 
             if (string.IsNullOrWhiteSpace(question.QuestionText))
 
-            {
+                {
 
-                continue;
+                    continue;
 
-            }
+                }
 
 
 

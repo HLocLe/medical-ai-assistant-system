@@ -12,24 +12,29 @@ using MedMateAI.Application.Common.Time;
 using MedMateAI.Application.Helpers;
 using MedMateAI.Application.IService;
 using MedMateAI.Application.Models.ServiceCredits;
+using MedMateAI.Application.Options;
 using MedMateAI.Domain.Common;
 using MedMateAI.Domain.Entities;
 using MedMateAI.Domain.Enums;
 using MedMateAI.Domain.Persistence;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MedMateAI.Application.Service;
 
 public sealed class SymptomAnalysisService : ISymptomAnalysisService
 {
     private const int MaxMessageLength = 2000;
-    private const int MaxFreeSubmissionsPerDay = 5;
 
     private const string UnsupportedSymptomMessage =
         "Không xác định được triệu chứng trong các khoa đang hỗ trợ (hô hấp, cơ xương khớp, truyền nhiễm siêu vi). Vui lòng mô tả rõ hơn.";
 
-    private static readonly string FreeDailyQuotaExceededMessage =
-        $"Bạn đã dùng hết lượt trong gói cước và đạt giới hạn tối đa {MaxFreeSubmissionsPerDay} lượt phân tích miễn phí trong ngày hôm nay. Vui lòng quay lại vào ngày mai hoặc mua thêm gói cước.";
+    private const string UnauthenticatedMessage = "Người dùng chưa đăng nhập";
+
+    private const string SessionNotFoundMessage = "Không tìm thấy phiên phân tích triệu chứng";
+
+    private const string SessionExpiredMessage =
+        "Phiên phân tích triệu chứng đã hết hạn. Vui lòng tạo phiên mới.";
 
     private static readonly JsonSerializerOptions DiagnosisJsonOptions = new()
     {
@@ -42,9 +47,11 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     private readonly IMedGemmaChatService _medGemmaChatService;
     private readonly IIcdLookupService _icdLookupService;
     private readonly ISymptomAnalysisQuotaService _quotaService;
+    private readonly IFreeQuotaService _freeQuotaService;
     private readonly ISymptomAnalysisJobScheduler _jobScheduler;
     private readonly IMapper _mapper;
     private readonly ILogger<SymptomAnalysisService> _logger;
+    private readonly SymptomAnalysisOptions _options;
 
     public SymptomAnalysisService(
         IUnitOfWork unitOfWork,
@@ -53,9 +60,11 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         IMedGemmaChatService medGemmaChatService,
         IIcdLookupService icdLookupService,
         ISymptomAnalysisQuotaService quotaService,
+        IFreeQuotaService freeQuotaService,
         ISymptomAnalysisJobScheduler jobScheduler,
         IMapper mapper,
-        ILogger<SymptomAnalysisService> logger)
+        ILogger<SymptomAnalysisService> logger,
+        IOptions<SymptomAnalysisOptions> options)
     {
         _unitOfWork = unitOfWork;
         _userService = userService;
@@ -63,10 +72,15 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         _medGemmaChatService = medGemmaChatService;
         _icdLookupService = icdLookupService;
         _quotaService = quotaService;
+        _freeQuotaService = freeQuotaService;
         _jobScheduler = jobScheduler;
         _mapper = mapper;
         _logger = logger;
+        _options = options.Value;
     }
+
+    private string QuotaExhaustedMessage =>
+        $"Bạn đã dùng hết {_options.FreeDailyLimit} lượt phân tích miễn phí trong ngày hôm nay và không còn lượt trong gói cước. Vui lòng quay lại vào ngày mai hoặc mua thêm gói cước.";
 
     // 
     public async Task<SymptomAnalysisResponse?> GetSessionByIdAsync(
@@ -152,8 +166,15 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
         var utcNow = DateTime.UtcNow;
         var businessDate = VietnamBusinessDate.GetToday(utcNow);
-        var usedToday = await CountFreeCompletedTodayAsync(currentUser.Id, businessDate, cancellationToken);
-        var remainingToday = Math.Max(0, MaxFreeSubmissionsPerDay - usedToday);
+        var freeUsage = await _freeQuotaService.GetAsync(
+            currentUser.Id,
+            SymptomAnalysisQuotaService.FreeQuotaFeature,
+            businessDate,
+            cancellationToken);
+        var limitPerDay = freeUsage?.LimitValue ?? _options.FreeDailyLimit;
+        var usedToday = freeUsage?.UsedCount ?? 0;
+        var reservedToday = freeUsage?.ReservedCount ?? 0;
+        var remainingToday = Math.Max(0, limitPerDay - usedToday - reservedToday);
 
         var usages = await _unitOfWork.QuotaUsages.GetEligibleByUserAsync(
             currentUser.Id,
@@ -167,8 +188,9 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         return new SymptomAnalysisQuotaResponse
         {
             BusinessDate = businessDate,
-            LimitPerDay = MaxFreeSubmissionsPerDay,
+            LimitPerDay = limitPerDay,
             UsedToday = usedToday,
+            ReservedToday = reservedToday,
             RemainingToday = remainingToday,
             HasServiceCredit = hasServiceCredit,
             IsFreeTier = !hasServiceCredit,
@@ -217,11 +239,13 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         var matchedQuestions = await _unitOfWork.ClinicalQuestions
             .GetQuestionsByChapterIdsAsync(new List<Guid> { topChapter.Key }, cancellationToken);
 
-        var currentUser = await _userService.GetCurrentUserAsync(cancellationToken);
+        var currentUser = await _userService.GetCurrentUserAsync(cancellationToken)
+            ?? throw new InvalidOperationException(UnauthenticatedMessage);
+
         var session = new SymptomAnalysisSession
         {
             Id = Guid.NewGuid(),
-            UserId = currentUser?.Id,
+            UserId = currentUser.Id,
             InputText = trimmedInput,
             Status = SymptomAnalysisSessionStatus.Processing,
             DisclaimerShown = true,
@@ -232,10 +256,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
         try
         {
-            if (currentUser is not null)
-            {
-                await ApplyQuotaForNewSessionAsync(session, currentUser.Id, cancellationToken);
-            }
+            await ApplyQuotaForNewSessionAsync(session, currentUser.Id, cancellationToken);
 
             _unitOfWork.SymptomAnalysisSessions.Add(session);
 
@@ -301,18 +322,27 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     {
         var prepared = await PrepareClinicalQuestionSubmissionAsync(request, cancellationToken);
 
-        prepared.Session.Status = SymptomAnalysisSessionStatus.Processing;
-        prepared.Session.CompletedAt = null;
-        prepared.Session.UpdatedAt = DateTime.UtcNow;
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        if (!prepared.AlreadySubmitted)
+        {
+            var submitted = await _unitOfWork.SymptomAnalysisSessions.TryMarkSubmittedAsync(
+                prepared.Session.Id,
+                DateTime.UtcNow,
+                cancellationToken);
+            if (!submitted)
+            {
+                throw new InvalidOperationException(SessionExpiredMessage);
+            }
 
-        _jobScheduler.EnqueueAnalyze(prepared.Session.Id);
+            _jobScheduler.EnqueueAnalyze(prepared.Session.Id);
+        }
 
         return new ClinicalQuestionAnswersResponse
         {
             SessionId = prepared.Session.Id,
             UserInput = prepared.Session.InputText ?? string.Empty,
-            Status = prepared.Session.Status,
+            Status = prepared.AlreadySubmitted
+                ? prepared.Session.Status
+                : SymptomAnalysisSessionStatus.Processing,
             Answers = _mapper.Map<List<ClinicalQuestionAnswerResult>>(prepared.Answers),
             MedGemmaPrompt = prepared.BayesianPrompt,
         };
@@ -370,7 +400,8 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
     private sealed record PreparedClinicalSubmission(SymptomAnalysisSession Session,
     IReadOnlyList<SessionClinicalQuestionAnswer> Answers,
-    string BayesianPrompt);
+    string BayesianPrompt,
+    bool AlreadySubmitted);
 
     private async Task<PreparedClinicalSubmission> PrepareClinicalQuestionSubmissionAsync(
         SubmitClinicalQuestionAnswersRequest request,
@@ -382,14 +413,16 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         if (request.SessionId == Guid.Empty)
             throw new ArgumentException("Id phiên phân tích triệu chứng là bắt buộc");
 
-        var session = await _unitOfWork.SymptomAnalysisSessions.GetByIdAsync(request.SessionId, cancellationToken);
-        if (session is null || session.IsDeleted)
-            throw new ArgumentException("Không tìm thấy phiên phân tích triệu chứng");
+        var currentUser = await _userService.GetCurrentUserAsync(cancellationToken)
+            ?? throw new InvalidOperationException(UnauthenticatedMessage);
 
-        if (session.UserId.HasValue && !session.UserSubscriptionId.HasValue)
-        {
-            await EnsureFreeDailyQuotaAvailableAsync(session.UserId.Value, cancellationToken);
-        }
+        var session = await _unitOfWork.SymptomAnalysisSessions.GetByIdAsync(request.SessionId, cancellationToken);
+        if (session is null || session.IsDeleted || session.UserId != currentUser.Id)
+            throw new ArgumentException(SessionNotFoundMessage);
+
+        var alreadySubmitted = session.SubmittedAt.HasValue;
+        if (!alreadySubmitted && session.Status != SymptomAnalysisSessionStatus.Processing)
+            throw new InvalidOperationException(SessionExpiredMessage);
 
         if (string.IsNullOrWhiteSpace(session.InputText))
             throw new ArgumentException("Nội dung triệu chứng của phiên không tồn tại");
@@ -400,31 +433,34 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         if (existingAnswers.Count == 0)
             throw new ArgumentException("Không tìm thấy câu hỏi lâm sàng cho phiên này");
 
-        var submittedByQuestionId = (request.Answers ?? [])
-            .Where(a => a.QuestionId != Guid.Empty)
-            .GroupBy(a => a.QuestionId)
-            .ToDictionary(g => g.Key, g => g.Last().Answers);
-
-        foreach (var existingAnswer in existingAnswers)
+        if (!alreadySubmitted)
         {
-            var question = existingAnswer.ClinicalQuestion
-                ?? throw new InvalidOperationException("ClinicalQuestion is required.");
+            var submittedByQuestionId = (request.Answers ?? [])
+                .Where(a => a.QuestionId != Guid.Empty)
+                .GroupBy(a => a.QuestionId)
+                .ToDictionary(g => g.Key, g => g.Last().Answers);
 
-            var validOptions = ResolveQuestionAnswers(question);
-            submittedByQuestionId.TryGetValue(existingAnswer.ClinicalQuestionId, out var submitted);
+            foreach (var existingAnswer in existingAnswers)
+            {
+                var question = existingAnswer.ClinicalQuestion
+                    ?? throw new InvalidOperationException("ClinicalQuestion is required.");
 
-            existingAnswer.AnswerValues = MergeSubmittedAnswerValues(validOptions, submitted);
-            existingAnswer.UpdatedAt = DateTime.UtcNow;
+                var validOptions = ResolveQuestionAnswers(question);
+                submittedByQuestionId.TryGetValue(existingAnswer.ClinicalQuestionId, out var submitted);
+
+                existingAnswer.AnswerValues = MergeSubmittedAnswerValues(validOptions, submitted);
+                existingAnswer.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
-
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         var bayesianPrompt = await BuildMedGemmaBayesianPromptAsync(
             session.InputText,
             existingAnswers,
             cancellationToken);
 
-        return new PreparedClinicalSubmission(session, existingAnswers, bayesianPrompt);
+        return new PreparedClinicalSubmission(session, existingAnswers, bayesianPrompt, alreadySubmitted);
     }
 
     private async Task ApplyQuotaForNewSessionAsync(
@@ -433,6 +469,23 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         CancellationToken cancellationToken)
     {
         var quotaUtcNow = DateTime.UtcNow;
+
+        var freeUsage = await _freeQuotaService.TryReserveAsync(
+            userId,
+            SymptomAnalysisQuotaService.FreeQuotaFeature,
+            _options.FreeDailyLimit,
+            SymptomAnalysisQuotaService.ReferenceType,
+            session.Id,
+            quotaUtcNow,
+            cancellationToken);
+
+        if (freeUsage is not null)
+        {
+            session.QuotaSource = QuotaSource.Free;
+            session.FreeQuotaUsageId = freeUsage.Id;
+            return;
+        }
+
         var reserveResult = await _quotaService.ReserveAsync(
             userId,
             session.Id,
@@ -442,6 +495,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
         if (reserveResult.Success && reserveResult.Data is not null)
         {
+            session.QuotaSource = QuotaSource.ServiceCredit;
             session.UserSubscriptionId = reserveResult.Data.UserSubscriptionId;
             session.UserSubscriptionUsageId = reserveResult.Data.Id;
             return;
@@ -450,43 +504,49 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         if (reserveResult.Error is ServiceCreditErrorCode.NoCreditPackage
             or ServiceCreditErrorCode.ServiceCreditExhausted)
         {
-            await EnsureFreeDailyQuotaAvailableAsync(userId, cancellationToken);
-            return;
+            throw new InvalidOperationException(QuotaExhaustedMessage);
         }
 
         throw new InvalidOperationException(
             $"Không thể kiểm tra giới hạn lượt dùng: {reserveResult.Error}");
     }
 
-    private async Task EnsureFreeDailyQuotaAvailableAsync(
-        Guid userId,
-        CancellationToken cancellationToken)
+    public async Task<int> ExpireAbandonedSessionsAsync(CancellationToken cancellationToken = default)
     {
-        var today = VietnamBusinessDate.GetToday(DateTimeOffset.UtcNow);
-        var todayFreeCount = await CountFreeCompletedTodayAsync(userId, today, cancellationToken);
+        var utcNow = DateTime.UtcNow;
+        var createdBefore = utcNow.AddMinutes(-_options.AbandonedSessionTimeoutMinutes);
 
-        if (todayFreeCount >= MaxFreeSubmissionsPerDay)
+        var sessionIds = await _unitOfWork.SymptomAnalysisSessions.GetAbandonedSessionIdsAsync(
+            createdBefore,
+            _options.AbandonedSessionCleanupBatchSize,
+            cancellationToken);
+
+        var expiredCount = 0;
+        foreach (var sessionId in sessionIds)
         {
-            throw new InvalidOperationException(FreeDailyQuotaExceededMessage);
+            var expired = await _unitOfWork.SymptomAnalysisSessions.TryMarkAbandonedAsFailedAsync(
+                sessionId,
+                createdBefore,
+                utcNow,
+                cancellationToken);
+            if (!expired)
+            {
+                continue;
+            }
+
+            _jobScheduler.EnqueueQuotaFinalize(sessionId);
+            expiredCount++;
         }
-    }
 
-    private async Task<int> CountFreeCompletedTodayAsync(
-        Guid userId,
-        DateOnly today,
-        CancellationToken cancellationToken)
-    {
-        var completedFreeSessions = await _unitOfWork.SymptomAnalysisSessions.GetAllAsync(
-            s => s.UserId == userId
-                 && s.Status == SymptomAnalysisSessionStatus.Completed
-                 && s.CompletedAt.HasValue
-                 && s.UserSubscriptionId == null
-                 && !s.IsDeleted,
-            cancellationToken: cancellationToken);
+        if (expiredCount > 0)
+        {
+            _logger.LogInformation(
+                "Expired {ExpiredCount} abandoned symptom analysis sessions created before {CreatedBefore}.",
+                expiredCount,
+                createdBefore);
+        }
 
-        return completedFreeSessions.Count(s =>
-            VietnamBusinessDate.GetToday(new DateTimeOffset(DateTime.SpecifyKind(s.CompletedAt!.Value, DateTimeKind.Utc)))
-            == today);
+        return expiredCount;
     }
 
     private static Dictionary<Guid, (int TotalScore, List<string> MatchedKeywords, string ChapterCode)> MatchChaptersByKeywords(

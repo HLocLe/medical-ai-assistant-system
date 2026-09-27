@@ -74,6 +74,7 @@ public class Program
         var app = builder.Build();
 
         app.UsePayOSPendingPaymentMaintenance();
+        app.UseSymptomAnalysisMaintenance();
 
         app.UseSwagger();
         app.UseSwaggerUI(c =>

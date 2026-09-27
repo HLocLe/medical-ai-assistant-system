@@ -21,6 +21,7 @@ public class SymptomAnalysisQuotaServiceTests
     private Mock<IUnitOfWork> _unitOfWorkMock = null!;
     private Mock<IQuotaUsageRepository> _quotaUsageRepositoryMock = null!;
     private Mock<ILogger<SymptomAnalysisQuotaService>> _loggerMock = null!;
+    private Mock<IFreeQuotaService> _freeQuotaServiceMock = null!;
     private SymptomAnalysisQuotaService _service = null!;
 
     [SetUp]
@@ -34,8 +35,11 @@ public class SymptomAnalysisQuotaServiceTests
 
         _unitOfWorkMock.Setup(unitOfWork => unitOfWork.QuotaUsages).Returns(_quotaUsageRepositoryMock.Object);
 
+        _freeQuotaServiceMock = new Mock<IFreeQuotaService>();
+
         _service = new SymptomAnalysisQuotaService(
             _serviceCreditServiceMock.Object,
+            _freeQuotaServiceMock.Object,
             _sessionsMock.Object,
             _unitOfWorkMock.Object,
             _loggerMock.Object);
@@ -132,6 +136,51 @@ public class SymptomAnalysisQuotaServiceTests
         _unitOfWorkMock.Verify(unitOfWork => unitOfWork.CommitTransactionAsync(It.IsAny<CancellationToken>()), Times.Once);
         _serviceCreditServiceMock.VerifyAll();
     }
+
+    [TestCase(SymptomAnalysisSessionStatus.Completed, SubscriptionQuotaActionType.Consume)]
+    [TestCase(SymptomAnalysisSessionStatus.Failed, SubscriptionQuotaActionType.Release)]
+    public async Task FinalizeAsync_FreeSession_FinalizesFreeQuotaAndSkipsServiceCredit(
+        SymptomAnalysisSessionStatus status,
+        SubscriptionQuotaActionType expectedAction)
+    {
+        var session = MakeFreeSession(status);
+        SetupSession(session);
+
+        await _service.FinalizeAsync(session.Id, CancellationToken.None);
+
+        _freeQuotaServiceMock.Verify(service => service.FinalizeAsync(
+                session.FreeQuotaUsageId!.Value,
+                session.UserId!.Value,
+                SymptomAnalysisQuotaService.FreeQuotaFeature,
+                expectedAction,
+                SymptomAnalysisQuotaService.ReferenceType,
+                session.Id,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        _serviceCreditServiceMock.VerifyNoOtherCalls();
+    }
+
+    [Test]
+    public async Task FinalizeAsync_FreeSessionStillProcessing_DoesNothing()
+    {
+        var session = MakeFreeSession(SymptomAnalysisSessionStatus.Processing);
+        SetupSession(session);
+
+        await _service.FinalizeAsync(session.Id, CancellationToken.None);
+
+        _freeQuotaServiceMock.VerifyNoOtherCalls();
+        _serviceCreditServiceMock.VerifyNoOtherCalls();
+    }
+
+    private static SymptomAnalysisSession MakeFreeSession(SymptomAnalysisSessionStatus status) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            UserId = Guid.NewGuid(),
+            QuotaSource = QuotaSource.Free,
+            FreeQuotaUsageId = Guid.NewGuid(),
+            Status = status
+        };
 
     private void SetupSession(SymptomAnalysisSession? session)
     {

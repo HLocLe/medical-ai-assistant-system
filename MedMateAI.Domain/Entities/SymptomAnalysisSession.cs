@@ -10,6 +10,12 @@ public sealed class SymptomAnalysisSession : BaseEntity
 
     public Guid? UserSubscriptionUsageId { get; set; }
 
+    public QuotaSource QuotaSource { get; set; } = QuotaSource.None;
+
+    public Guid? FreeQuotaUsageId { get; set; }
+
+    public DateTime? SubmittedAt { get; set; }
+
     public string? InputText { get; set; }
 
     public string? SeverityLevel { get; set; }
@@ -25,6 +31,8 @@ public sealed class SymptomAnalysisSession : BaseEntity
     public UserSubscription? UserSubscription { get; set; }
 
     public UserSubscriptionUsage? UserSubscriptionUsage { get; set; }
+
+    public FreeQuotaUsage? FreeQuotaUsage { get; set; }
 
     public ICollection<SessionSymptom> SessionSymptoms { get; set; } = new List<SessionSymptom>();
 

@@ -70,7 +70,7 @@ public abstract class ServiceCreditSessionQuotaService<TSession>
             cancellationToken);
     }
 
-    public async Task FinalizeAsync(
+    public virtual async Task FinalizeAsync(
         Guid sessionId,
         CancellationToken cancellationToken = default)
     {

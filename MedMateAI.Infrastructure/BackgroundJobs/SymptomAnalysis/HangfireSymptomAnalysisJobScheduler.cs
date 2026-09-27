@@ -9,4 +9,9 @@ public sealed class HangfireSymptomAnalysisJobScheduler : ISymptomAnalysisJobSch
     {
         BackgroundJob.Enqueue<SymptomAnalysisMedGemmaJob>(job => job.ExecuteAsync(sessionId, null!));
     }
+
+    public void EnqueueQuotaFinalize(Guid sessionId)
+    {
+        BackgroundJob.Enqueue<SymptomAnalysisQuotaFinalizeJob>(job => job.ExecuteAsync(sessionId));
+    }
 }

@@ -118,6 +118,7 @@ public static class DependencyInjection
         services.AddScoped<IAIConfigService, AIConfigService>();
         services.AddScoped<IWebChatbotService, WebChatbotService>();
         services.AddScoped<ISymptomAnalysisService, SymptomAnalysisService>();
+        services.AddScoped<IFreeQuotaService, FreeQuotaService>();
         services.AddScoped<ISymptomAnalysisQuotaService, SymptomAnalysisQuotaService>();
         services.AddScoped<IConsultationSessionService, ConsultationSessionService>();
         services.AddScoped<IConsultationSessionQuotaService, ConsultationSessionQuotaService>();
@@ -193,6 +194,16 @@ public static class DependencyInjection
             .Bind(configuration.GetSection(RecoveryPlanOptions.SectionName))
             .Validate(x => x.AssignmentTimeoutMinutes is > 0 and <= 120,
                 "RecoveryPlan AssignmentTimeoutMinutes must be between 1 and 120.")
+            .ValidateOnStart();
+        services.AddOptions<SymptomAnalysisOptions>()
+            .Bind(configuration.GetSection(SymptomAnalysisOptions.SectionName))
+            .Validate(
+                options =>
+                    options.FreeDailyLimit >= 0
+                    && options.AbandonedSessionTimeoutMinutes is >= 1 and <= 1440
+                    && options.AbandonedSessionCleanupIntervalMinutes is >= 1 and <= 60
+                    && options.AbandonedSessionCleanupBatchSize is >= 1 and <= 1000,
+                "SymptomAnalysis options are invalid.")
             .ValidateOnStart();
         services.AddOptions<BackgroundJobRetryOptions>()
             .Bind(configuration.GetSection(BackgroundJobRetryOptions.SectionName))

@@ -47,4 +47,6 @@ public interface ISymptomAnalysisService
 
     Task<SymptomAnalysisQuotaResponse?> GetQuotaAsync(
         CancellationToken cancellationToken = default);
+
+    Task<int> ExpireAbandonedSessionsAsync(CancellationToken cancellationToken = default);
 }
