@@ -15,6 +15,7 @@ public interface ILabTestService
     Task<LabTestUploadResponse?> GetSessionAsync(
         Guid userId,
         Guid sessionId,
+        bool isAdmin = false,
         CancellationToken cancellationToken = default);
 
     Task<PagedResponse<LabTestSessionSummaryResponse>> GetSessionsByUserIdAsync(

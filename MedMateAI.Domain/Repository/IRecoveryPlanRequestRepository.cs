@@ -86,6 +86,11 @@ public interface IRecoveryPlanRequestRepository
         Guid userId,
         CancellationToken cancellationToken = default);
 
+    Task<bool> IsLabSessionAssignedToDoctorAsync(
+        Guid labTestSessionId,
+        Guid doctorId,
+        CancellationToken cancellationToken = default);
+
     Task<RecoveryPlanRequestReadinessProfileData?> GetPatientProfileReadinessAsync(
         Guid userId,
         CancellationToken cancellationToken = default);

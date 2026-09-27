@@ -353,6 +353,19 @@ public sealed class RecoveryPlanRequestRepository : IRecoveryPlanRequestReposito
             cancellationToken);
     }
 
+    public Task<bool> IsLabSessionAssignedToDoctorAsync(
+        Guid labTestSessionId,
+        Guid doctorId,
+        CancellationToken cancellationToken = default)
+    {
+        return _context.RecoveryPlanRequests.AnyAsync(
+            request =>
+                !request.IsDeleted
+                && request.PrimaryLabTestSessionId == labTestSessionId
+                && request.AssignedDoctorId == doctorId,
+            cancellationToken);
+    }
+
     public void Add(RecoveryPlanRequest request)
     {
         _context.RecoveryPlanRequests.Add(request);
