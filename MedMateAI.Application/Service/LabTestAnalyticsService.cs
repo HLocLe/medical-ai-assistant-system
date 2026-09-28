@@ -100,7 +100,8 @@ public sealed class LabTestAnalyticsService : ILabTestAnalyticsService
         }
 
         var latest = measurements[^1];
-        var previous = measurements.Count > 1 ? measurements[^2] : null;
+        var previous = measurements.LastOrDefault(measurement =>
+            measurement.TestDate < latest.TestDate);
         var persistedUnits = measurements
             .Select(measurement => NormalizeUnit(measurement.ReferenceUnit))
             .Where(unit => unit is not null)
@@ -197,9 +198,15 @@ public sealed class LabTestAnalyticsService : ILabTestAnalyticsService
         var previousUnit = GetComparableUnit(previous);
         var latestUnit = GetComparableUnit(latest);
 
-        return previousUnit is not null
-            && latestUnit is not null
-            && string.Equals(previousUnit, latestUnit, StringComparison.OrdinalIgnoreCase);
+        if (previousUnit is null || latestUnit is null)
+        {
+            return previousUnit is null && latestUnit is null;
+        }
+
+        return string.Equals(
+            previousUnit,
+            latestUnit,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? GetComparableUnit(LabTestTrendMeasurementData measurement) =>
