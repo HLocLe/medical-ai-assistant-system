@@ -87,7 +87,7 @@ public sealed class LabTestAnalyticsService : ILabTestAnalyticsService
             cancellationToken);
         var measurements = repositoryMeasurements
             .Where(measurement => double.IsFinite(measurement.Value))
-            .OrderBy(measurement => measurement.TestDate)
+            .OrderBy(measurement => measurement.SessionCreatedAt)
             .ThenBy(measurement => measurement.SessionId)
             .ThenBy(measurement => measurement.ResultDetailId)
             .ToList();
@@ -100,8 +100,7 @@ public sealed class LabTestAnalyticsService : ILabTestAnalyticsService
         }
 
         var latest = measurements[^1];
-        var previous = measurements.LastOrDefault(measurement =>
-            measurement.TestDate < latest.TestDate);
+        var previous = measurements.Count > 1 ? measurements[^2] : null;
         var persistedUnits = measurements
             .Select(measurement => NormalizeUnit(measurement.ReferenceUnit))
             .Where(unit => unit is not null)
@@ -149,9 +148,7 @@ public sealed class LabTestAnalyticsService : ILabTestAnalyticsService
         LabTestTrendMeasurementData? previous,
         LabTestTrendMeasurementData latest)
     {
-        if (previous is null
-            || previous.TestDate == latest.TestDate
-            || !HaveCompatibleUnits(previous, latest))
+        if (previous is null || !HaveCompatibleUnits(previous, latest))
         {
             return LabTestTrendClassification.InsufficientData;
         }

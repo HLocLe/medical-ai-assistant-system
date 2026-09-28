@@ -98,6 +98,7 @@ public sealed class LabTestAnalyticsRepository : ILabTestAnalyticsRepository
                 row.Symbol,
                 row.Name,
                 row.IndicatorUnit,
+                row.SessionCreatedAt,
                 DateOnly.FromDateTime(row.SessionCreatedAt),
                 row.Value,
                 row.Status,

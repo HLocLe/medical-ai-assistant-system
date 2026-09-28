@@ -9,6 +9,7 @@ public sealed record LabTestTrendMeasurementData(
     string Symbol,
     string? Name,
     string? IndicatorUnit,
+    DateTime SessionCreatedAt,
     DateOnly TestDate,
     double Value,
     LabResultStatus Status,
