@@ -164,10 +164,17 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             return null;
         }
 
-        var utcNow = DateTime.UtcNow;
+        return await BuildQuotaResponseAsync(currentUser.Id, DateTime.UtcNow, cancellationToken);
+    }
+
+    private async Task<SymptomAnalysisQuotaResponse> BuildQuotaResponseAsync(
+        Guid userId,
+        DateTime utcNow,
+        CancellationToken cancellationToken)
+    {
         var businessDate = VietnamBusinessDate.GetToday(utcNow);
         var freeUsage = await _freeQuotaService.GetAsync(
-            currentUser.Id,
+            userId,
             SymptomAnalysisQuotaService.FreeQuotaFeature,
             businessDate,
             cancellationToken);
@@ -177,7 +184,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         var remainingToday = Math.Max(0, limitPerDay - usedToday - reservedToday);
 
         var usages = await _unitOfWork.QuotaUsages.GetEligibleByUserAsync(
-            currentUser.Id,
+            userId,
             IServiceCreditService.QuotaCode,
             utcNow,
             cancellationToken);
@@ -240,6 +247,13 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         var currentUser = await _userService.GetCurrentUserAsync(cancellationToken)
             ?? throw new InvalidOperationException(UnauthenticatedMessage);
 
+        // Quota is only reserved on submit; this early check just avoids answering questions for nothing.
+        var quota = await BuildQuotaResponseAsync(currentUser.Id, DateTime.UtcNow, cancellationToken);
+        if (quota.RemainingToday <= 0 && !quota.HasServiceCredit)
+        {
+            throw new InvalidOperationException(QuotaExhaustedMessage);
+        }
+
         var session = new SymptomAnalysisSession
         {
             Id = Guid.NewGuid(),
@@ -250,67 +264,54 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             CreatedAt = DateTime.UtcNow,
         };
 
-        await _unitOfWork.BeginTransactionAsync(cancellationToken);
+        _unitOfWork.SymptomAnalysisSessions.Add(session);
 
-        try
+        var results = new List<SuggestedClinicalQuestionResponse>(matchedQuestions.Count);
+        foreach (var question in matchedQuestions)
         {
-            await ApplyQuotaForNewSessionAsync(session, currentUser.Id, cancellationToken);
-
-            _unitOfWork.SymptomAnalysisSessions.Add(session);
-
-            var results = new List<SuggestedClinicalQuestionResponse>(matchedQuestions.Count);
-            foreach (var question in matchedQuestions)
+            if (question.ChapterId is null
+                || !chapterMatches.TryGetValue(question.ChapterId.Value, out var chapterMatch))
             {
-                if (question.ChapterId is null
-                    || !chapterMatches.TryGetValue(question.ChapterId.Value, out var chapterMatch))
-                {
-                    continue;
-                }
-
-                var questionAnswers = ResolveQuestionAnswers(question);
-                var defaultAnswerValues = CreateDefaultAnswerValues(questionAnswers);
-
-                results.Add(new SuggestedClinicalQuestionResponse
-                {
-                    QuestionId = question.Id,
-                    QuestionVi = question.QuestionVi,
-                    ChapterId = question.ChapterId,
-                    ChapterCode = question.ChapterCode ?? chapterMatch.ChapterCode,
-                    TotalScore = chapterMatch.TotalScore,
-                    MatchedKeywords = chapterMatch.MatchedKeywords,
-                    Answers = questionAnswers,
-                });
-
-                _unitOfWork.SessionClinicalQuestionAnswers.Add(new SessionClinicalQuestionAnswer
-                {
-                    Id = Guid.NewGuid(),
-                    SymptomAnalysisSessionId = session.Id,
-                    ClinicalQuestionId = question.Id,
-                    AnswerValues = defaultAnswerValues,
-                    CreatedAt = DateTime.UtcNow,
-                });
+                continue;
             }
 
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            var questionAnswers = ResolveQuestionAnswers(question);
+            var defaultAnswerValues = CreateDefaultAnswerValues(questionAnswers);
 
-            var orderedResults = results
-                .OrderByDescending(result => result.TotalScore)
-                .ThenBy(result => result.ChapterCode)
-                .ThenBy(result => result.QuestionVi)
-                .ToList();
-
-            return new SuggestClinicalQuestionsResponse
+            results.Add(new SuggestedClinicalQuestionResponse
             {
-                SessionId = session.Id,
-                Questions = orderedResults,
-            };
+                QuestionId = question.Id,
+                QuestionVi = question.QuestionVi,
+                ChapterId = question.ChapterId,
+                ChapterCode = question.ChapterCode ?? chapterMatch.ChapterCode,
+                TotalScore = chapterMatch.TotalScore,
+                MatchedKeywords = chapterMatch.MatchedKeywords,
+                Answers = questionAnswers,
+            });
+
+            _unitOfWork.SessionClinicalQuestionAnswers.Add(new SessionClinicalQuestionAnswer
+            {
+                Id = Guid.NewGuid(),
+                SymptomAnalysisSessionId = session.Id,
+                ClinicalQuestionId = question.Id,
+                AnswerValues = defaultAnswerValues,
+                CreatedAt = DateTime.UtcNow,
+            });
         }
-        catch
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        var orderedResults = results
+            .OrderByDescending(result => result.TotalScore)
+            .ThenBy(result => result.ChapterCode)
+            .ThenBy(result => result.QuestionVi)
+            .ToList();
+
+        return new SuggestClinicalQuestionsResponse
         {
-            await _unitOfWork.RollbackTransactionAsync(CancellationToken.None);
-            throw;
-        }
+            SessionId = session.Id,
+            Questions = orderedResults,
+        };
     }
 
     // 
@@ -322,13 +323,28 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
         if (!prepared.AlreadySubmitted)
         {
-            var submitted = await _unitOfWork.SymptomAnalysisSessions.TryMarkSubmittedAsync(
-                prepared.Session.Id,
-                DateTime.UtcNow,
-                cancellationToken);
-            if (!submitted)
+            await _unitOfWork.BeginTransactionAsync(cancellationToken);
+
+            try
             {
-                throw new InvalidOperationException(SessionExpiredMessage);
+                var submitted = await _unitOfWork.SymptomAnalysisSessions.TryMarkSubmittedAsync(
+                    prepared.Session.Id,
+                    DateTime.UtcNow,
+                    cancellationToken);
+                if (!submitted)
+                {
+                    throw new InvalidOperationException(SessionExpiredMessage);
+                }
+
+                await ApplyQuotaForNewSessionAsync(prepared.Session, prepared.UserId, cancellationToken);
+
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                await _unitOfWork.CommitTransactionAsync(cancellationToken);
+            }
+            catch
+            {
+                await _unitOfWork.RollbackTransactionAsync(CancellationToken.None);
+                throw;
             }
 
             _jobScheduler.EnqueueAnalyze(prepared.Session.Id);
@@ -397,6 +413,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     // private method cho SubmitClinicalQuestionAnswersAsync.
 
     private sealed record PreparedClinicalSubmission(SymptomAnalysisSession Session,
+    Guid UserId,
     IReadOnlyList<SessionClinicalQuestionAnswer> Answers,
     string BayesianPrompt,
     bool AlreadySubmitted);
@@ -449,8 +466,6 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
                 existingAnswer.AnswerValues = MergeSubmittedAnswerValues(validOptions, submitted);
                 existingAnswer.UpdatedAt = DateTime.UtcNow;
             }
-
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
 
         var bayesianPrompt = await BuildMedGemmaBayesianPromptAsync(
@@ -458,7 +473,12 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             existingAnswers,
             cancellationToken);
 
-        return new PreparedClinicalSubmission(session, existingAnswers, bayesianPrompt, alreadySubmitted);
+        return new PreparedClinicalSubmission(
+            session,
+            currentUser.Id,
+            existingAnswers,
+            bayesianPrompt,
+            alreadySubmitted);
     }
 
     private async Task ApplyQuotaForNewSessionAsync(

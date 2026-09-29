@@ -104,6 +104,12 @@ public class SymptomAnalysisServiceTests
                 UserSubscriptionId = Guid.NewGuid(),
             }));
         SetupFreeReserve(new FreeQuotaUsage { Id = Guid.NewGuid(), UserId = _userId, LimitValue = 5 });
+        _quotaUsagesMock.Setup(r => r.GetEligibleByUserAsync(
+                It.IsAny<Guid>(),
+                It.IsAny<string>(),
+                It.IsAny<DateTime>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<UserSubscriptionUsage>());
 
         _userServiceMock.Setup(s => s.GetCurrentUserAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(new ApplicationUserResponse { Id = _userId });
@@ -293,7 +299,6 @@ public class SymptomAnalysisServiceTests
 
         _sessionAnswersMock.Verify(r => r.Add(It.IsAny<SessionClinicalQuestionAnswer>()), Times.Once);
         _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
-        _unitOfWorkMock.Verify(u => u.CommitTransactionAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Test]
@@ -432,7 +437,10 @@ public class SymptomAnalysisServiceTests
             Assert.That(result.SessionId, Is.EqualTo(_sessionId));
             Assert.That(result.Status, Is.EqualTo(SymptomAnalysisSessionStatus.Processing));
             Assert.That(answer.AnswerValues["yes"], Is.True);
+            Assert.That(session.QuotaSource, Is.EqualTo(QuotaSource.Free));
         });
+        _unitOfWorkMock.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _unitOfWorkMock.Verify(u => u.CommitTransactionAsync(It.IsAny<CancellationToken>()), Times.Once);
         _jobSchedulerMock.Verify(s => s.EnqueueAnalyze(_sessionId), Times.Once);
         _quotaServiceMock.Verify(
             q => q.FinalizeAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()),
@@ -526,6 +534,11 @@ public class SymptomAnalysisServiceTests
             new SubmitClinicalQuestionAnswersRequest { SessionId = _sessionId, Answers = [] },
             CancellationToken.None));
         _jobSchedulerMock.Verify(s => s.EnqueueAnalyze(It.IsAny<Guid>()), Times.Never);
+        _unitOfWorkMock.Verify(u => u.RollbackTransactionAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _freeQuotaServiceMock.Verify(f => f.TryReserveAsync(
+                It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(),
+                It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 
     [Test]
@@ -579,11 +592,9 @@ public class SymptomAnalysisServiceTests
 
     [Test]
     [Category("N")]
-    public async Task SuggestClinicalQuestionAsync_FreeAvailable_UsesFreeAndSkipsCredit()
+    public async Task SuggestClinicalQuestionAsync_DoesNotReserveQuota()
     {
         SetupSuggestChapterAndQuestion();
-        var freeUsageId = Guid.NewGuid();
-        SetupFreeReserve(new FreeQuotaUsage { Id = freeUsageId, UserId = _userId, LimitValue = 5 });
         SymptomAnalysisSession? added = null;
         _sessionsMock.Setup(r => r.Add(It.IsAny<SymptomAnalysisSession>()))
             .Callback<SymptomAnalysisSession>(s => added = s);
@@ -591,9 +602,83 @@ public class SymptomAnalysisServiceTests
         await _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = "Đau đầu" });
 
         Assert.That(added, Is.Not.Null);
-        Assert.That(added!.QuotaSource, Is.EqualTo(QuotaSource.Free));
-        Assert.That(added.FreeQuotaUsageId, Is.EqualTo(freeUsageId));
-        Assert.That(added.UserSubscriptionId, Is.Null);
+        Assert.That(added!.QuotaSource, Is.EqualTo(QuotaSource.None));
+        Assert.That(added.FreeQuotaUsageId, Is.Null);
+        Assert.That(added.UserSubscriptionUsageId, Is.Null);
+        _freeQuotaServiceMock.Verify(f => f.TryReserveAsync(
+                It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(),
+                It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+        _quotaServiceMock.Verify(q => q.ReserveAsync(
+                It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Test]
+    [Category("A")]
+    public void SuggestClinicalQuestionAsync_NoFreeLeftAndNoCredit_ThrowsWithoutCreatingSession()
+    {
+        SetupSuggestChapterAndQuestion();
+        _freeQuotaServiceMock.Setup(f => f.GetAsync(
+                _userId, SymptomAnalysisQuotaService.FreeQuotaFeature, It.IsAny<DateOnly>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FreeQuotaUsage { Id = Guid.NewGuid(), UserId = _userId, LimitValue = 5, UsedCount = 5 });
+
+        Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = "Đau đầu" }));
+        _sessionsMock.Verify(r => r.Add(It.IsAny<SymptomAnalysisSession>()), Times.Never);
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task SuggestClinicalQuestionAsync_NoFreeLeftButHasCredit_CreatesSession()
+    {
+        SetupSuggestChapterAndQuestion();
+        _freeQuotaServiceMock.Setup(f => f.GetAsync(
+                _userId, SymptomAnalysisQuotaService.FreeQuotaFeature, It.IsAny<DateOnly>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FreeQuotaUsage { Id = Guid.NewGuid(), UserId = _userId, LimitValue = 5, UsedCount = 5 });
+        _quotaUsagesMock.Setup(r => r.GetEligibleByUserAsync(
+                _userId, IServiceCreditService.QuotaCode, It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<UserSubscriptionUsage> { new() { Id = Guid.NewGuid(), LimitValue = 10 } });
+
+        await _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = "Đau đầu" });
+
+        _sessionsMock.Verify(r => r.Add(It.IsAny<SymptomAnalysisSession>()), Times.Once);
+    }
+
+    private SymptomAnalysisSession CreateUnsubmittedSession()
+    {
+        var session = new SymptomAnalysisSession
+        {
+            Id = _sessionId,
+            UserId = _userId,
+            InputText = "ho khan",
+            Status = SymptomAnalysisSessionStatus.Processing,
+        };
+        SetupSubmittableSession(session);
+        _sessionsMock.Setup(r => r.TryMarkSubmittedAsync(_sessionId, It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        return session;
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task SubmitClinicalQuestionAnswersAsync_FreeAvailable_ReservesFreeAndSkipsCredit()
+    {
+        var session = CreateUnsubmittedSession();
+        var freeUsageId = Guid.NewGuid();
+        SetupFreeReserve(new FreeQuotaUsage { Id = freeUsageId, UserId = _userId, LimitValue = 5 });
+
+        await _service.SubmitClinicalQuestionAnswersAsync(
+            new SubmitClinicalQuestionAnswersRequest { SessionId = _sessionId, Answers = [] },
+            CancellationToken.None);
+
+        Assert.That(session.QuotaSource, Is.EqualTo(QuotaSource.Free));
+        Assert.That(session.FreeQuotaUsageId, Is.EqualTo(freeUsageId));
+        Assert.That(session.UserSubscriptionId, Is.Null);
+        _freeQuotaServiceMock.Verify(f => f.TryReserveAsync(
+                _userId, SymptomAnalysisQuotaService.FreeQuotaFeature, It.IsAny<int>(),
+                SymptomAnalysisQuotaService.ReferenceType, _sessionId, It.IsAny<DateTime>(), It.IsAny<CancellationToken>()),
+            Times.Once);
         _quotaServiceMock.Verify(q => q.ReserveAsync(
                 It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()),
             Times.Never);
@@ -601,45 +686,46 @@ public class SymptomAnalysisServiceTests
 
     [Test]
     [Category("N")]
-    public async Task SuggestClinicalQuestionAsync_FreeExhausted_FallsBackToServiceCredit()
+    public async Task SubmitClinicalQuestionAnswersAsync_FreeExhausted_FallsBackToServiceCredit()
     {
-        SetupSuggestChapterAndQuestion();
+        var session = CreateUnsubmittedSession();
         SetupFreeReserve(null);
         var subscriptionId = Guid.NewGuid();
         var usageId = Guid.NewGuid();
         _quotaServiceMock.Setup(q => q.ReserveAsync(
-                _userId, It.IsAny<Guid>(), _userId, It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
+                _userId, _sessionId, _userId, It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(ServiceCreditOperationResult<UserSubscriptionUsage>.Ok(new UserSubscriptionUsage
             {
                 Id = usageId,
                 UserSubscriptionId = subscriptionId,
             }));
-        SymptomAnalysisSession? added = null;
-        _sessionsMock.Setup(r => r.Add(It.IsAny<SymptomAnalysisSession>()))
-            .Callback<SymptomAnalysisSession>(s => added = s);
 
-        await _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = "Đau đầu" });
+        await _service.SubmitClinicalQuestionAnswersAsync(
+            new SubmitClinicalQuestionAnswersRequest { SessionId = _sessionId, Answers = [] },
+            CancellationToken.None);
 
-        Assert.That(added!.QuotaSource, Is.EqualTo(QuotaSource.ServiceCredit));
-        Assert.That(added.FreeQuotaUsageId, Is.Null);
-        Assert.That(added.UserSubscriptionId, Is.EqualTo(subscriptionId));
-        Assert.That(added.UserSubscriptionUsageId, Is.EqualTo(usageId));
+        Assert.That(session.QuotaSource, Is.EqualTo(QuotaSource.ServiceCredit));
+        Assert.That(session.FreeQuotaUsageId, Is.Null);
+        Assert.That(session.UserSubscriptionId, Is.EqualTo(subscriptionId));
+        Assert.That(session.UserSubscriptionUsageId, Is.EqualTo(usageId));
     }
 
     [Test]
     [Category("A")]
-    public void SuggestClinicalQuestionAsync_FreeAndCreditExhausted_ThrowsAndRollsBack()
+    public void SubmitClinicalQuestionAnswersAsync_FreeAndCreditExhausted_ThrowsRollsBackAndDoesNotEnqueue()
     {
-        SetupSuggestChapterAndQuestion();
+        CreateUnsubmittedSession();
         SetupFreeReserve(null);
         _quotaServiceMock.Setup(q => q.ReserveAsync(
                 It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(ServiceCreditOperationResult<UserSubscriptionUsage>.Fail(ServiceCreditErrorCode.NoCreditPackage));
 
-        Assert.ThrowsAsync<InvalidOperationException>(() =>
-            _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = "Đau đầu" }));
+        Assert.ThrowsAsync<InvalidOperationException>(() => _service.SubmitClinicalQuestionAnswersAsync(
+            new SubmitClinicalQuestionAnswersRequest { SessionId = _sessionId, Answers = [] },
+            CancellationToken.None));
         _unitOfWorkMock.Verify(u => u.RollbackTransactionAsync(It.IsAny<CancellationToken>()), Times.Once);
         _unitOfWorkMock.Verify(u => u.CommitTransactionAsync(It.IsAny<CancellationToken>()), Times.Never);
+        _jobSchedulerMock.Verify(s => s.EnqueueAnalyze(It.IsAny<Guid>()), Times.Never);
     }
 
     private (Guid FeverChapterId, Guid HeadacheChapterId, List<List<Guid>> RequestedChapterIds) SetupFeverAndHeadacheChapters()
