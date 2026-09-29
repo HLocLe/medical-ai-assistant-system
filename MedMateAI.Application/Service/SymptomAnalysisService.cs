@@ -220,12 +220,10 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
             throw new ArgumentException(UnsupportedSymptomMessage);
         }
 
-        var inputWords = normalizedInput
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .ToList();
+        var inputTokens = TokenizeMatchingInput(trimmedInput);
 
         var activeChapters = await _unitOfWork.IcdChapters.GetActiveChaptersAsync(cancellationToken);
-        var chapterMatches = MatchChaptersByKeywords(activeChapters, inputWords);
+        var chapterMatches = MatchChaptersByKeywords(activeChapters, inputTokens);
         if (chapterMatches.Count == 0)
         {
             throw new ArgumentException(UnsupportedSymptomMessage);
@@ -551,7 +549,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
     private static Dictionary<Guid, (int TotalScore, List<string> MatchedKeywords, string ChapterCode)> MatchChaptersByKeywords(
         IReadOnlyList<IcdChapter> activeChapters,
-        IReadOnlyList<string> inputWords)
+        IReadOnlyList<MatchingToken> inputTokens)
     {
         var chapterMatches = new Dictionary<Guid, (int TotalScore, List<string> MatchedKeywords, string ChapterCode)>();
 
@@ -562,7 +560,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
                 continue;
             }
 
-            var (totalScore, matchedKeywords) = ScoreChapterKeywords(chapter.KeywordWeights, inputWords);
+            var (totalScore, matchedKeywords) = ScoreChapterKeywords(chapter.KeywordWeights, inputTokens);
             if (totalScore > 0)
             {
                 chapterMatches[chapter.Id] = (totalScore, matchedKeywords, chapter.ChapterCode);
@@ -574,14 +572,14 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
     private static (int TotalScore, List<string> MatchedKeywords) ScoreChapterKeywords(
         IReadOnlyDictionary<string, int> keywordWeights,
-        IReadOnlyList<string> inputWords)
+        IReadOnlyList<MatchingToken> inputTokens)
     {
         var totalScore = 0;
         var matchedKeywords = new List<string>();
 
         foreach (var (keyword, weight) in keywordWeights)
         {
-            if (!IsKeywordMatched(keyword, inputWords))
+            if (!IsKeywordMatched(keyword, inputTokens))
             {
                 continue;
             }
@@ -593,7 +591,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         return (totalScore, matchedKeywords);
     }
 
-    private static bool IsKeywordMatched(string keyword, IReadOnlyList<string> inputWords)
+    private static bool IsKeywordMatched(string keyword, IReadOnlyList<MatchingToken> inputTokens)
     {
         if (string.IsNullOrWhiteSpace(keyword))
         {
@@ -607,27 +605,97 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
         }
 
         var keywordTokens = normalizedKeyword.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        return MatchesKeywordTokens(inputWords, keywordTokens);
+
+        // A keyword counts only if at least one occurrence is not negated ("không sốt" does not match "sốt").
+        return FindKeywordOccurrenceStarts(inputTokens, keywordTokens)
+            .Any(startIndex => !IsNegated(inputTokens, startIndex));
     }
 
-    private static bool MatchesKeywordTokens(IReadOnlyList<string> inputWords, string[] keywordTokens)
+    private static IEnumerable<int> FindKeywordOccurrenceStarts(
+        IReadOnlyList<MatchingToken> tokens,
+        string[] keywordTokens)
     {
-        return keywordTokens.Length switch
+        switch (keywordTokens.Length)
         {
-            1 => inputWords.Contains(keywordTokens[0]),
-            2 => Check2WordDistanceByArray(
-                inputWords,
-                keywordTokens[0],
-                keywordTokens[1],
-                maxDistance: 2),
-            3 => Check3WordDistanceByArray(
-                inputWords,
-                keywordTokens[0],
-                keywordTokens[1],
-                keywordTokens[2],
-                maxDistance: 2),
-            _ => false,
-        };
+            case 1:
+                foreach (var index in IndicesOf(tokens, keywordTokens[0]))
+                {
+                    yield return index;
+                }
+
+                break;
+
+            case 2:
+                foreach (var index1 in IndicesOf(tokens, keywordTokens[0]))
+                {
+                    foreach (var index2 in IndicesOf(tokens, keywordTokens[1]))
+                    {
+                        if (WordGap(index1, index2) <= KeywordMaxWordGap)
+                        {
+                            yield return Math.Min(index1, index2);
+                        }
+                    }
+                }
+
+                break;
+
+            case 3:
+                foreach (var index1 in IndicesOf(tokens, keywordTokens[0]))
+                {
+                    foreach (var index2 in IndicesOf(tokens, keywordTokens[1]))
+                    {
+                        if (WordGap(index1, index2) > KeywordMaxWordGap)
+                        {
+                            continue;
+                        }
+
+                        foreach (var index3 in IndicesOf(tokens, keywordTokens[2]))
+                        {
+                            if (WordGap(index2, index3) <= KeywordMaxWordGap)
+                            {
+                                yield return Math.Min(index1, Math.Min(index2, index3));
+                            }
+                        }
+                    }
+                }
+
+                break;
+        }
+    }
+
+    private static IEnumerable<int> IndicesOf(IReadOnlyList<MatchingToken> tokens, string word)
+    {
+        for (var index = 0; index < tokens.Count; index++)
+        {
+            if (tokens[index].Word == word)
+            {
+                yield return index;
+            }
+        }
+    }
+
+    private static int WordGap(int index1, int index2) => Math.Abs(index1 - index2) - 1;
+
+    private static bool IsNegated(IReadOnlyList<MatchingToken> tokens, int startIndex)
+    {
+        var clauseIndex = tokens[startIndex].ClauseIndex;
+        var lowerBound = Math.Max(0, startIndex - NegationWindowSize);
+
+        for (var index = startIndex - 1; index >= lowerBound; index--)
+        {
+            var token = tokens[index];
+            if (token.ClauseIndex != clauseIndex || ClauseBreakWords.Contains(token.Word))
+            {
+                return false;
+            }
+
+            if (NegationWords.Contains(token.Word))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     //
@@ -1083,50 +1151,26 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
 
 
     //private method cho SuggestClinicalQuestionAsync
-    private static bool Check2WordDistanceByArray(IReadOnlyList<string> words, string w1, string w2, int maxDistance)
-    {
-        var indicesW1 = Enumerable.Range(0, words.Count).Where(i => words[i] == w1).ToList();
-        var indicesW2 = Enumerable.Range(0, words.Count).Where(i => words[i] == w2).ToList();
+    private sealed record MatchingToken(string Word, int ClauseIndex);
 
-        foreach (var index1 in indicesW1)
+    private static List<MatchingToken> TokenizeMatchingInput(string text)
+    {
+        var tokens = new List<MatchingToken>();
+        var clauses = MatchingClauseSeparatorRegex.Split(text.ToLowerInvariant());
+
+        for (var clauseIndex = 0; clauseIndex < clauses.Length; clauseIndex++)
         {
-            foreach (var index2 in indicesW2)
+            var words = clauses[clauseIndex].Split(
+                (char[]?)null,
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            foreach (var word in words)
             {
-                var distance = Math.Abs(index1 - index2) - 1;
-                if (distance <= maxDistance)
-                {
-                    return true;
-                }
+                tokens.Add(new MatchingToken(word, clauseIndex));
             }
         }
 
-        return false;
-    }
-
-    //
-    private static bool Check3WordDistanceByArray(IReadOnlyList<string> words, string w1, string w2, string w3, int maxDistance)
-    {
-        var indicesW1 = Enumerable.Range(0, words.Count).Where(i => words[i] == w1).ToList();
-        var indicesW2 = Enumerable.Range(0, words.Count).Where(i => words[i] == w2).ToList();
-        var indicesW3 = Enumerable.Range(0, words.Count).Where(i => words[i] == w3).ToList();
-        foreach (var index1 in indicesW1)
-        {
-            foreach (var index2 in indicesW2)
-            {
-                foreach (var index3 in indicesW3)
-                {
-                    var distance1 = Math.Abs(index1 - index2) - 1;
-                    var distance2 = Math.Abs(index2 - index3) - 1;
-
-                    if (distance1 <= maxDistance && distance2 <= maxDistance)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
+        return tokens;
     }
 
     //private method cho GetSessionByIdAsync
@@ -1234,6 +1278,23 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
     new(@"[.,?!;:]", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
      private static readonly Regex MatchingWhitespaceRegex =
     new(@"\s+", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+    private static readonly Regex MatchingClauseSeparatorRegex =
+    new(@"[.,?!;:\r\n]", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+
+    private const int KeywordMaxWordGap = 2;
+    private const int NegationWindowSize = 3;
+
+    // "không còn" and "không bị" are covered by "không" within the negation window.
+    private static readonly HashSet<string> NegationWords = new(StringComparer.Ordinal)
+    {
+        "không", "chưa", "hết", "chẳng", "ko",
+    };
+
+    // Negation never crosses these conjunctions: "không sốt nhưng đau đầu" keeps "đau đầu".
+    private static readonly HashSet<string> ClauseBreakWords = new(StringComparer.Ordinal)
+    {
+        "nhưng", "mà", "và", "song",
+    };
 
     private static Dictionary<string, string> ResolveQuestionAnswers(ClinicalQuestion question)
     {

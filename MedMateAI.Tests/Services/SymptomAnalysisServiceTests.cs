@@ -642,6 +642,103 @@ public class SymptomAnalysisServiceTests
         _unitOfWorkMock.Verify(u => u.CommitTransactionAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    private (Guid FeverChapterId, Guid HeadacheChapterId, List<List<Guid>> RequestedChapterIds) SetupFeverAndHeadacheChapters()
+    {
+        var feverChapterId = Guid.NewGuid();
+        var headacheChapterId = Guid.NewGuid();
+        var requestedChapterIds = new List<List<Guid>>();
+
+        _chaptersMock.Setup(r => r.GetActiveChaptersAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new List<IcdChapter>
+            {
+                new()
+                {
+                    Id = feverChapterId,
+                    ChapterCode = "A",
+                    KeywordWeights = new Dictionary<string, int> { ["sốt"] = 5 }
+                },
+                new()
+                {
+                    Id = headacheChapterId,
+                    ChapterCode = "G",
+                    KeywordWeights = new Dictionary<string, int> { ["đau đầu"] = 3 }
+                },
+            });
+        _questionsMock.Setup(r => r.GetQuestionsByChapterIdsAsync(It.IsAny<List<Guid>>(), It.IsAny<CancellationToken>()))
+            .Callback<IReadOnlyList<Guid>, CancellationToken>((ids, _) => requestedChapterIds.Add(ids.ToList()))
+            .ReturnsAsync((IReadOnlyList<Guid> ids, CancellationToken _) => ids
+                .Select(id => new ClinicalQuestion
+                {
+                    Id = Guid.NewGuid(),
+                    QuestionVi = "Câu hỏi",
+                    ChapterId = id,
+                    Answers = new Dictionary<string, string> { ["có"] = "yes" }
+                })
+                .ToList());
+
+        return (feverChapterId, headacheChapterId, requestedChapterIds);
+    }
+
+    [TestCase("Tôi không sốt")]
+    [TestCase("Tôi không bị sốt")]
+    [TestCase("Tôi không còn sốt")]
+    [TestCase("Chưa thấy sốt")]
+    [TestCase("Đã hết sốt rồi")]
+    [TestCase("ko sốt")]
+    [Category("A")]
+    public void SuggestClinicalQuestionAsync_OnlyNegatedSymptom_ThrowsUnsupported(string userInput)
+    {
+        SetupFeverAndHeadacheChapters();
+
+        Assert.ThrowsAsync<ArgumentException>(() =>
+            _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = userInput }));
+        _freeQuotaServiceMock.Verify(f => f.TryReserveAsync(
+                It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(),
+                It.IsAny<Guid>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [TestCase("Tôi không sốt nhưng đau đầu")]
+    [TestCase("Không sốt, đau đầu nhiều")]
+    [TestCase("không sốt và bị đau đầu")]
+    [Category("N")]
+    public async Task SuggestClinicalQuestionAsync_NegatedSymptomDoesNotScore_PicksAffirmedChapter(string userInput)
+    {
+        var (_, headacheChapterId, requestedChapterIds) = SetupFeverAndHeadacheChapters();
+
+        await _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = userInput });
+
+        Assert.That(requestedChapterIds.Single(), Is.EqualTo(new List<Guid> { headacheChapterId }));
+    }
+
+    [TestCase("Tôi bị sốt cao")]
+    [TestCase("sốt không hạ được")]
+    [TestCase("Không biết sao, tôi bị sốt")]
+    [TestCase("Không ăn uống được mấy hôm nay bị sốt")]
+    [Category("N")]
+    public async Task SuggestClinicalQuestionAsync_NegationOutsideWindowOrAfterKeyword_StillScores(string userInput)
+    {
+        var (feverChapterId, _, requestedChapterIds) = SetupFeverAndHeadacheChapters();
+
+        await _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest { UserInput = userInput });
+
+        Assert.That(requestedChapterIds.Single(), Is.EqualTo(new List<Guid> { feverChapterId }));
+    }
+
+    [Test]
+    [Category("N")]
+    public async Task SuggestClinicalQuestionAsync_KeywordNegatedOnceButAffirmedLater_StillScores()
+    {
+        var (feverChapterId, _, requestedChapterIds) = SetupFeverAndHeadacheChapters();
+
+        await _service.SuggestClinicalQuestionAsync(new SuggestClinicalQuestionRequest
+        {
+            UserInput = "Hôm qua không sốt. Hôm nay lại sốt"
+        });
+
+        Assert.That(requestedChapterIds.Single(), Is.EqualTo(new List<Guid> { feverChapterId }));
+    }
+
     [Test]
     [Category("N")]
     public async Task ExpireAbandonedSessionsAsync_MarksFailedAndEnqueuesFinalizeOnlyForWonRaces()
