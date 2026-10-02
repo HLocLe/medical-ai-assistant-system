@@ -92,10 +92,10 @@ public class Program
         app.UseCors("AllowFrontend");
         app.UseHttpsRedirection();
 
-        if (app.Environment.IsDevelopment())
+        app.UseHangfireDashboard("/hangfire", new DashboardOptions
         {
-            app.UseHangfireDashboard("/hangfire");
-        }
+            Authorization = [],
+        });
 
         app.UseAuthentication();
         app.UseAuthorization();

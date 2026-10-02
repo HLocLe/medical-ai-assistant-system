@@ -811,7 +811,7 @@ public sealed class SymptomAnalysisService : ISymptomAnalysisService
                 DiseaseName = parsed.DiseaseName,
                 SearchKeyword = parsed.SearchKeyword,
                 Icd10Code = lookup?.Icd10Code ?? string.Empty,
-                PA = parsed.PA,
+                PA = parsed.PA,          
                 PBGivenA = parsed.PBGivenA,
                 PAGivenB = pB > 0 ? (parsed.PA * parsed.PBGivenA) / pB : 0,
                 ClinicalReasoning = parsed.ClinicalReasoning,
